@@ -340,7 +340,7 @@ export function AnnouncementsSection({
             checked={isEnabled}
             onCheckedChange={handleToggleEnabled}
             label={t('Enabled')}
-            className='border-b-0 py-0'
+            className='py-0'
           />
         </div>
 
@@ -520,8 +520,7 @@ export function AnnouncementsSection({
                 <FormItem>
                   <FormLabel>{t('Type')}</FormLabel>
                   <Select
-                    items={[
-                      ...typeOptions.map((option) => ({
+                    items={typeOptions.map((option) => ({
                         value: option.value,
                         label: (
                           <div className='flex items-center gap-2'>
@@ -531,8 +530,7 @@ export function AnnouncementsSection({
                             {option.label}
                           </div>
                         ),
-                      })),
-                    ]}
+                      }))}
                     onValueChange={field.onChange}
                     value={field.value}
                   >

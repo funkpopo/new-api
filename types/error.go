@@ -40,7 +40,6 @@ type ErrorCode string
 const (
 	ErrorCodeInvalidRequest         ErrorCode = "invalid_request"
 	ErrorCodeSensitiveWordsDetected ErrorCode = "sensitive_words_detected"
-	ErrorCodePrivacyFilterFailed    ErrorCode = "privacy_filter_failed"
 	ErrorCodeViolationFeeGrokCSAM   ErrorCode = "violation_fee.grok.csam"
 
 	// new api error
@@ -65,6 +64,7 @@ const (
 	ErrorCodeReadRequestBodyFailed ErrorCode = "read_request_body_failed"
 	ErrorCodeConvertRequestFailed  ErrorCode = "convert_request_failed"
 	ErrorCodeAccessDenied          ErrorCode = "access_denied"
+	ErrorCodePrivacyFilterFailed   ErrorCode = "privacy_filter_failed"
 
 	// request error
 	ErrorCodeBadRequestBody ErrorCode = "bad_request_body"

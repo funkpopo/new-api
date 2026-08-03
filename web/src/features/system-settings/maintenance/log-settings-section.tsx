@@ -80,12 +80,14 @@ import type { LogCleanupTask } from '../types'
 
 const logSettingsSchema = z.object({
   LogConsumeEnabled: z.boolean(),
+  LogRequestResponseEnabled: z.boolean(),
 })
 
 type LogSettingsFormValues = z.infer<typeof logSettingsSchema>
 
 type LogSettingsSectionProps = {
   defaultEnabled: boolean
+  defaultRequestResponseEnabled: boolean
 }
 
 type ServerLogInfo = {
@@ -139,15 +141,14 @@ function isActiveLogCleanupTask(task: LogCleanupTask | null) {
   return task?.status === 'pending' || task?.status === 'running'
 }
 
-export function LogSettingsSection({
-  defaultEnabled,
-}: LogSettingsSectionProps) {
+export function LogSettingsSection(props: LogSettingsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const form = useForm<LogSettingsFormValues>({
     resolver: zodResolver(logSettingsSchema),
     defaultValues: {
-      LogConsumeEnabled: defaultEnabled,
+      LogConsumeEnabled: props.defaultEnabled,
+      LogRequestResponseEnabled: props.defaultRequestResponseEnabled,
     },
   })
 
@@ -174,8 +175,11 @@ export function LogSettingsSection({
   }, [])
 
   useEffect(() => {
-    form.reset({ LogConsumeEnabled: defaultEnabled })
-  }, [defaultEnabled, form])
+    form.reset({
+      LogConsumeEnabled: props.defaultEnabled,
+      LogRequestResponseEnabled: props.defaultRequestResponseEnabled,
+    })
+  }, [form, props.defaultEnabled, props.defaultRequestResponseEnabled])
 
   useEffect(() => {
     fetchServerLogInfo()
@@ -257,11 +261,26 @@ export function LogSettingsSection({
   }, [logCleanupActive, logCleanupTaskId, t])
 
   const onSubmit = async (values: LogSettingsFormValues) => {
-    if (values.LogConsumeEnabled === defaultEnabled) return
-    await updateOption.mutateAsync({
-      key: 'LogConsumeEnabled',
-      value: values.LogConsumeEnabled,
-    })
+    const updates = []
+    if (values.LogConsumeEnabled !== props.defaultEnabled) {
+      updates.push(
+        updateOption.mutateAsync({
+          key: 'LogConsumeEnabled',
+          value: values.LogConsumeEnabled,
+        })
+      )
+    }
+    if (
+      values.LogRequestResponseEnabled !== props.defaultRequestResponseEnabled
+    ) {
+      updates.push(
+        updateOption.mutateAsync({
+          key: 'LogRequestResponseEnabled',
+          value: values.LogRequestResponseEnabled,
+        })
+      )
+    }
+    await Promise.all(updates)
   }
 
   const handleRequestCleanLogs = () => {
@@ -353,6 +372,32 @@ export function LogSettingsSection({
                   <FormDescription>
                     {t(
                       'Track per-request consumption to power usage analytics. Keeping this on increases database writes.'
+                    )}
+                  </FormDescription>
+                </SettingsSwitchContent>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
+                </FormControl>
+                <FormMessage />
+              </SettingsSwitchItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='LogRequestResponseEnabled'
+            render={({ field }) => (
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>
+                    {t('Record request and response content')}
+                  </FormLabel>
+                  <FormDescription>
+                    {t(
+                      'Store complete client request bodies and server responses in usage log details. Content may contain sensitive data and increases log storage usage.'
                     )}
                   </FormDescription>
                 </SettingsSwitchContent>

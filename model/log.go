@@ -285,6 +285,7 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
+	common.AttachRelayContentToLog(c, other)
 	otherStr := common.MapToJsonStr(other)
 	// 判断是否需要记录 IP
 	needRecordIp := false
@@ -349,6 +350,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
+	common.AttachRelayContentToLog(c, params.Other)
 	otherStr := common.MapToJsonStr(params.Other)
 	// 判断是否需要记录 IP
 	needRecordIp := false
@@ -726,12 +728,30 @@ func DeleteOldLogBatch(ctx context.Context, targetTimestamp int64, limit int) (i
 		).Error; err != nil {
 			return 0, err
 		}
+		if err := LOG_DB.WithContext(ctx).Exec(
+			"ALTER TABLE log_content_chunks DELETE WHERE created_at < ? SETTINGS mutations_sync = 1",
+			targetTimestamp,
+		).Error; err != nil {
+			return 0, err
+		}
 		return total, nil
 	}
 
-	result := LOG_DB.WithContext(ctx).Where("created_at < ?", targetTimestamp).Limit(limit).Delete(&Log{})
+	tx := LOG_DB.WithContext(ctx).Begin()
+	if tx.Error != nil {
+		return 0, tx.Error
+	}
+	result := tx.Where("created_at < ?", targetTimestamp).Limit(limit).Delete(&Log{})
 	if nil != result.Error {
+		tx.Rollback()
 		return 0, result.Error
+	}
+	if err := tx.Where("created_at < ?", targetTimestamp).Delete(&LogContentChunk{}).Error; err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit().Error; err != nil {
+		return 0, err
 	}
 	return result.RowsAffected, nil
 }

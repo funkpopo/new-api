@@ -69,6 +69,8 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 }
 
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
+	common.BeginRelayContentCapture(c)
+	defer model.PersistRelayContentCapture(c)
 
 	requestId := c.GetString(common.RequestIdKey)
 	//group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
@@ -408,6 +410,8 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 }
 
 func RelayMidjourney(c *gin.Context) {
+	common.BeginRelayContentCapture(c)
+	defer model.PersistRelayContentCapture(c)
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatMjProxy, nil, nil)
 
 	if err != nil {
@@ -490,6 +494,8 @@ func RelayTaskFetch(c *gin.Context) {
 }
 
 func RelayTask(c *gin.Context) {
+	common.BeginRelayContentCapture(c)
+	defer model.PersistRelayContentCapture(c)
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, &taskdto.TaskError{

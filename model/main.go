@@ -270,6 +270,7 @@ func migrateDB() error {
 		&Redemption{},
 		&Ability{},
 		&Log{},
+		&LogContentChunk{},
 		&Midjourney{},
 		&TopUp{},
 		&QuotaData{},
@@ -333,6 +334,7 @@ func migrateDBFast() error {
 		{&Redemption{}, "Redemption"},
 		{&Ability{}, "Ability"},
 		{&Log{}, "Log"},
+		{&LogContentChunk{}, "LogContentChunk"},
 		{&Midjourney{}, "Midjourney"},
 		{&TopUp{}, "TopUp"},
 		{&QuotaData{}, "QuotaData"},
@@ -400,12 +402,15 @@ func migrateLOGDB() error {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return migrateClickHouseLogDB()
 	}
-	return LOG_DB.AutoMigrate(&Log{})
+	return LOG_DB.AutoMigrate(&Log{}, &LogContentChunk{})
 }
 
 func migrateClickHouseLogDB() error {
 	ttlDays := clickHouseLogTTLDays()
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
+		return err
+	}
+	if err := LOG_DB.Exec(clickHouseLogContentCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
 	return syncClickHouseLogTTL(ttlDays)
@@ -463,10 +468,31 @@ PARTITION BY toYYYYMM(toDateTime(created_at))
 ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
 }
 
+func clickHouseLogContentCreateTableSQL(ttlDays int) string {
+	return fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS log_content_chunks (
+	id Int64 DEFAULT 0,
+	request_id String DEFAULT '',
+	kind String DEFAULT '',
+	chunk_index Int32 DEFAULT 0,
+	content String DEFAULT '',
+	content_type String DEFAULT '',
+	size Int32 DEFAULT 0,
+	total_size Int64 DEFAULT 0,
+	created_at Int64 DEFAULT 0
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(toDateTime(created_at))
+ORDER BY (request_id, kind, chunk_index)%s`, clickHouseLogTTLClause(ttlDays))
+}
+
 func syncClickHouseLogTTL(ttlDays int) error {
 	expression := clickHouseLogTTLExpression(ttlDays)
 	if expression != "" {
-		return LOG_DB.Exec("ALTER TABLE logs MODIFY TTL " + expression).Error
+		if err := LOG_DB.Exec("ALTER TABLE logs MODIFY TTL " + expression).Error; err != nil {
+			return err
+		}
+		return LOG_DB.Exec("ALTER TABLE log_content_chunks MODIFY TTL " + expression).Error
 	}
 
 	hasTTL, err := clickHouseLogTableHasTTL()
@@ -476,7 +502,10 @@ func syncClickHouseLogTTL(ttlDays int) error {
 	if !hasTTL {
 		return nil
 	}
-	return LOG_DB.Exec("ALTER TABLE logs REMOVE TTL").Error
+	if err := LOG_DB.Exec("ALTER TABLE logs REMOVE TTL").Error; err != nil {
+		return err
+	}
+	return LOG_DB.Exec("ALTER TABLE log_content_chunks REMOVE TTL").Error
 }
 
 func clickHouseLogTableHasTTL() (bool, error) {

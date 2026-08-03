@@ -19,7 +19,10 @@ For commercial licensing, please contact [邮箱]
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { decodeCapturedContent } from '../../lib/captured-content'
+import {
+  decodeCapturedContent,
+  formatCapturedContent,
+} from '../../lib/captured-content'
 
 function toBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString('base64')
@@ -50,5 +53,96 @@ describe('captured usage-log content', () => {
     ]
 
     assert.equal(decodeCapturedContent(chunks, 'audio/mpeg'), toBase64(bytes))
+  })
+
+  test('shows only accumulated content from an OpenAI-compatible stream', () => {
+    const captured = [
+      'data: {"id":"chunk-1","choices":[{"index":0,"delta":{"reasoning_content":"hidden"}}]}',
+      '',
+      'data: {"id":"chunk-1","choices":[{"index":0,"delta":{"content":"## Result\\n\\n"}}]}',
+      '',
+      'data: {"id":"chunk-1","choices":[{"index":0,"delta":{"content":"**ready**"}}]}',
+      '',
+      'data: {"id":"chunk-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n')
+
+    assert.deepEqual(
+      formatCapturedContent(captured, 'text/event-stream', 'response'),
+      {
+        content: '## Result\n\n**ready**',
+        renderMarkdown: true,
+      }
+    )
+  })
+
+  test('concatenates token fragments when SSE events have no blank separator', () => {
+    const captured = [
+      'data: {"choices":[{"index":0,"delta":{"content":"服务"}}]}',
+      'data: {"choices":[{"index":0,"delta":{"content":"已"}}]}',
+      'data: {"choices":[{"index":0,"delta":{"content":"成功"}}]}',
+      'data: {"choices":[{"index":0,"delta":{"content":"启动"}}]}',
+      'data: {"choices":[{"index":0,"delta":{"content":"。\\n下一行"}}]}',
+      'data: [DONE]',
+    ].join('\r\n')
+
+    assert.deepEqual(
+      formatCapturedContent(captured, 'text/event-stream', 'response'),
+      {
+        content: '服务已成功启动。\n下一行',
+        renderMarkdown: true,
+      }
+    )
+  })
+
+  test('shows message content from a non-streaming chat response', () => {
+    const captured = JSON.stringify({
+      id: 'completion-1',
+      model: 'test-model',
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content: 'Rendered response' },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { total_tokens: 12 },
+    })
+
+    assert.deepEqual(
+      formatCapturedContent(captured, 'application/json', 'response'),
+      {
+        content: 'Rendered response',
+        renderMarkdown: true,
+      }
+    )
+  })
+
+  test('pretty-prints captured request JSON without dropping request fields', () => {
+    const captured =
+      '{"model":"test-model","messages":[{"role":"user","content":"hello"}]}'
+
+    assert.deepEqual(
+      formatCapturedContent(captured, 'application/json', 'request'),
+      {
+        content: JSON.stringify(JSON.parse(captured), null, 2),
+        renderMarkdown: false,
+      }
+    )
+  })
+
+  test('keeps an error response visible when it has no assistant content', () => {
+    const captured =
+      '{"error":{"message":"upstream unavailable","type":"server_error"}}'
+
+    assert.deepEqual(
+      formatCapturedContent(captured, 'application/json', 'response'),
+      {
+        content: JSON.stringify(JSON.parse(captured), null, 2),
+        renderMarkdown: false,
+      }
+    )
   })
 })

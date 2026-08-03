@@ -21,6 +21,7 @@ import { Check, Copy, LoaderCircle } from 'lucide-react'
 import { useMemo, useState, type ReactNode, type UIEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { Response } from '@/components/ai-elements/response'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
@@ -28,6 +29,7 @@ import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { getLogContent } from '../../api'
 import {
   decodeCapturedContent,
+  formatCapturedContent,
   isTextContentType,
 } from '../../lib/captured-content'
 import type { LogContentKind } from '../../types'
@@ -66,15 +68,19 @@ export function CapturedContentSection(props: CapturedContentSectionProps) {
   )
   const chunks = useMemo(() => pages.flatMap((page) => page.chunks), [pages])
   const contentType = pages[0]?.content_type ?? ''
-  const displayedContent = useMemo(
+  const decodedContent = useMemo(
     () => decodeCapturedContent(chunks, contentType),
     [chunks, contentType]
+  )
+  const presentation = useMemo(
+    () => formatCapturedContent(decodedContent, contentType, props.kind),
+    [contentType, decodedContent, props.kind]
   )
   const totalChunks = pages[0]?.total_chunks ?? 0
   const totalSize = pages[0]?.total_size ?? 0
   const binary = pages.length > 0 && !isTextContentType(contentType)
 
-  const handleScroll = (event: UIEvent<HTMLPreElement>) => {
+  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget
     const closeToBottom =
       element.scrollHeight - element.scrollTop - element.clientHeight < 80
@@ -93,7 +99,10 @@ export function CapturedContentSection(props: CapturedContentSectionProps) {
       )
       const responses = await Promise.all(requests)
       const allChunks = responses.flatMap((response) => response.data.chunks)
-      await copyToClipboard(decodeCapturedContent(allChunks, contentType))
+      const completeContent = decodeCapturedContent(allChunks, contentType)
+      await copyToClipboard(
+        formatCapturedContent(completeContent, contentType, props.kind).content
+      )
     } finally {
       setCopying(false)
     }
@@ -125,12 +134,20 @@ export function CapturedContentSection(props: CapturedContentSectionProps) {
   } else {
     content = (
       <>
-        <pre
-          className='bg-background/60 max-h-72 overflow-auto rounded border p-2 pr-8 font-mono text-[11px] leading-relaxed whitespace-pre-wrap'
+        <div
+          className='bg-background/60 max-h-72 overflow-auto rounded border p-2 pr-8 text-[11px] leading-relaxed'
           onScroll={handleScroll}
         >
-          {displayedContent}
-        </pre>
+          {presentation.renderMarkdown ? (
+            <Response className='text-xs leading-relaxed wrap-break-word'>
+              {presentation.content}
+            </Response>
+          ) : (
+            <pre className='font-mono whitespace-pre-wrap'>
+              {presentation.content}
+            </pre>
+          )}
+        </div>
         <div className='text-muted-foreground mt-1 flex items-center justify-between gap-2 text-[11px]'>
           <span>
             {binary ? t('Binary content is displayed as Base64.') : null}

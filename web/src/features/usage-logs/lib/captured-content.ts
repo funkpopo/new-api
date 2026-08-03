@@ -136,6 +136,36 @@ function readResponseContent(value: unknown): string | null {
   return readChatCompletionContent(value) ?? readResponsesContent(value)
 }
 
+function readRequestItemsContent(value: unknown): string | null {
+  if (!Array.isArray(value)) return null
+
+  const parts: string[] = []
+  for (const item of value) {
+    if (typeof item === 'string') {
+      parts.push(item)
+      continue
+    }
+    if (!isRecord(item)) continue
+
+    const content = readTextContent(item.content)
+    if (content !== null) parts.push(content)
+  }
+  return parts.length > 0 ? parts.join('\n\n') : null
+}
+
+function readRequestContent(value: unknown): string | null {
+  if (!isRecord(value)) return null
+
+  const messagesContent = readRequestItemsContent(value.messages)
+  if (messagesContent !== null) return messagesContent
+
+  if (typeof value.input === 'string') return value.input
+  const inputContent = readRequestItemsContent(value.input)
+  if (inputContent !== null) return inputContent
+
+  return readTextContent(value.content)
+}
+
 function readSsePayloadContent(value: unknown): string | null {
   if (!isRecord(value)) return null
 
@@ -240,6 +270,10 @@ export function formatCapturedContent(
   }
 
   const parsed = parseJson(content)
+  const requestContent = readRequestContent(parsed)
+  if (requestContent !== null) {
+    return { content: requestContent, renderMarkdown: true }
+  }
   return {
     content: parsed === null ? content : JSON.stringify(parsed, null, 2),
     renderMarkdown: false,

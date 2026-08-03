@@ -120,15 +120,48 @@ describe('captured usage-log content', () => {
     )
   })
 
-  test('pretty-prints captured request JSON without dropping request fields', () => {
-    const captured =
-      '{"model":"test-model","messages":[{"role":"user","content":"hello"}]}'
+  test('shows only merged message content from a chat request as Markdown', () => {
+    const captured = JSON.stringify({
+      model: 'test-model',
+      temperature: 0.5,
+      messages: [
+        { role: 'system', content: '## Instructions\n\nBe concise.' },
+        { role: 'user', content: '**Check** the service.' },
+      ],
+    })
 
     assert.deepEqual(
       formatCapturedContent(captured, 'application/json', 'request'),
       {
-        content: JSON.stringify(JSON.parse(captured), null, 2),
-        renderMarkdown: false,
+        content: '## Instructions\n\nBe concise.\n\n**Check** the service.',
+        renderMarkdown: true,
+      }
+    )
+  })
+
+  test('merges structured request content while ignoring non-text parts', () => {
+    const captured = JSON.stringify({
+      model: 'test-model',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe this image.' },
+            {
+              type: 'image_url',
+              image_url: { url: 'data:image/png;base64,...' },
+            },
+            { type: 'text', text: '\nUse **Markdown**.' },
+          ],
+        },
+      ],
+    })
+
+    assert.deepEqual(
+      formatCapturedContent(captured, 'application/json', 'request'),
+      {
+        content: 'Describe this image.\nUse **Markdown**.',
+        renderMarkdown: true,
       }
     )
   })

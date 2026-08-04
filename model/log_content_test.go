@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,50 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func TestDeleteExpiredLogContentChunksBatchIsBoundedAndPreservesUsageLogs(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:log-content-cleanup-test?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&Log{}, &LogContentChunk{}))
+
+	previousLogDB := LOG_DB
+	previousLogDatabaseType := common.LogDatabaseType()
+	LOG_DB = db
+	common.SetLogDatabaseType(common.DatabaseTypeSQLite)
+	t.Cleanup(func() {
+		LOG_DB = previousLogDB
+		common.SetLogDatabaseType(previousLogDatabaseType)
+	})
+
+	require.NoError(t, db.Create(&Log{RequestId: "retained-log", CreatedAt: 100, Type: LogTypeConsume}).Error)
+	chunks := []LogContentChunk{
+		{RequestId: "old-1", Kind: common.RelayContentKindRequest, ChunkIndex: 0, CreatedAt: 100},
+		{RequestId: "old-2", Kind: common.RelayContentKindRequest, ChunkIndex: 0, CreatedAt: 200},
+		{RequestId: "old-3", Kind: common.RelayContentKindResponse, ChunkIndex: 0, CreatedAt: 300},
+		{RequestId: "new-1", Kind: common.RelayContentKindResponse, ChunkIndex: 0, CreatedAt: 500},
+	}
+	require.NoError(t, db.Create(&chunks).Error)
+
+	deleted, err := DeleteExpiredLogContentChunksBatch(context.Background(), 400, 2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), deleted)
+
+	remainingExpired, err := CountExpiredLogContentChunks(context.Background(), 400)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), remainingExpired)
+
+	deleted, err = DeleteExpiredLogContentChunksBatch(context.Background(), 400, 2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted)
+
+	var remainingChunks int64
+	require.NoError(t, db.Model(&LogContentChunk{}).Count(&remainingChunks).Error)
+	assert.Equal(t, int64(1), remainingChunks)
+
+	var remainingLogs int64
+	require.NoError(t, db.Model(&Log{}).Count(&remainingLogs).Error)
+	assert.Equal(t, int64(1), remainingLogs)
+}
 
 func TestRelayContentIsPersistedAndReadWithoutTruncation(t *testing.T) {
 	gin.SetMode(gin.TestMode)

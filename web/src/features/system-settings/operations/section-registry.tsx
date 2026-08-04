@@ -102,6 +102,9 @@ const OPERATIONS_SECTIONS = [
         defaultRequestResponseEnabled={Boolean(
           settings.LogRequestResponseEnabled
         )}
+        defaultRequestResponseRetentionDays={
+          settings.LogRequestResponseRetentionDays ?? 0
+        }
       />
     ),
   },

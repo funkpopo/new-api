@@ -128,7 +128,7 @@ export function CapturedContentSection(props: CapturedContentSectionProps) {
   } else if (query.isError) {
     content = (
       <p className='text-destructive py-6 text-center text-xs'>
-        {t('Failed to load')}
+        {t('Content has expired or is unavailable.')}
       </p>
     )
   } else {

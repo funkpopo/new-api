@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -18,6 +19,51 @@ const (
 )
 
 var ErrLogContentNotFound = errors.New("log content not found")
+
+func CountExpiredLogContentChunks(ctx context.Context, targetTimestamp int64) (int64, error) {
+	var count int64
+	err := LOG_DB.WithContext(ctx).Model(&LogContentChunk{}).
+		Where("created_at < ?", targetTimestamp).
+		Count(&count).Error
+	return count, err
+}
+
+// DeleteExpiredLogContentChunksBatch removes a bounded set of expired content
+// rows on relational databases. ClickHouse performs one synchronous mutation
+// because repeated small mutations rewrite data parts and are substantially
+// more expensive than one retention pass.
+func DeleteExpiredLogContentChunksBatch(ctx context.Context, targetTimestamp int64, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		count, err := CountExpiredLogContentChunks(ctx, targetTimestamp)
+		if err != nil || count == 0 {
+			return count, err
+		}
+		err = LOG_DB.WithContext(ctx).Exec(
+			"ALTER TABLE log_content_chunks DELETE WHERE created_at < ? SETTINGS mutations_sync = 1",
+			targetTimestamp,
+		).Error
+		return count, err
+	}
+
+	var ids []int64
+	err := LOG_DB.WithContext(ctx).Model(&LogContentChunk{}).
+		Where("created_at < ?", targetTimestamp).
+		Order("id").
+		Limit(limit).
+		Pluck("id", &ids).Error
+	if err != nil || len(ids) == 0 {
+		return 0, err
+	}
+	result := LOG_DB.WithContext(ctx).Where("id IN ?", ids).Delete(&LogContentChunk{})
+	return result.RowsAffected, result.Error
+}
 
 // LogContentChunk stores request and response bodies separately from the main
 // log row. Content is base64 encoded so arbitrary binary responses remain

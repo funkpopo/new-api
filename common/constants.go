@@ -93,6 +93,10 @@ var MemoryCacheEnabled bool
 var LogConsumeEnabled = true
 var LogRequestResponseEnabled = false
 
+// LogRequestResponseRetentionDays controls how long captured request and
+// response bodies are retained. Zero disables automatic content cleanup.
+var LogRequestResponseRetentionDays = 0
+
 var TLSInsecureSkipVerify bool
 var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}
 

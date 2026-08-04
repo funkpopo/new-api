@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
+import type { TFunction } from 'i18next'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -42,6 +43,7 @@ import {
   FormControl,
   FormDescription,
   FormField,
+  FormItem,
   FormLabel,
   FormMessage,
 } from '@/components/ui/form'
@@ -78,16 +80,23 @@ import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 import type { LogCleanupTask } from '../types'
 
-const logSettingsSchema = z.object({
-  LogConsumeEnabled: z.boolean(),
-  LogRequestResponseEnabled: z.boolean(),
-})
+const createLogSettingsSchema = (t: TFunction) =>
+  z.object({
+    LogConsumeEnabled: z.boolean(),
+    LogRequestResponseEnabled: z.boolean(),
+    LogRequestResponseRetentionDays: z
+      .number()
+      .int(t('Enter a whole number from 0 to 36500.'))
+      .min(0, t('Enter a whole number from 0 to 36500.'))
+      .max(36500, t('Enter a whole number from 0 to 36500.')),
+  })
 
-type LogSettingsFormValues = z.infer<typeof logSettingsSchema>
+type LogSettingsFormValues = z.infer<ReturnType<typeof createLogSettingsSchema>>
 
 type LogSettingsSectionProps = {
   defaultEnabled: boolean
   defaultRequestResponseEnabled: boolean
+  defaultRequestResponseRetentionDays: number
 }
 
 type ServerLogInfo = {
@@ -144,11 +153,14 @@ function isActiveLogCleanupTask(task: LogCleanupTask | null) {
 export function LogSettingsSection(props: LogSettingsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
+  const logSettingsSchema = useMemo(() => createLogSettingsSchema(t), [t])
   const form = useForm<LogSettingsFormValues>({
     resolver: zodResolver(logSettingsSchema),
     defaultValues: {
       LogConsumeEnabled: props.defaultEnabled,
       LogRequestResponseEnabled: props.defaultRequestResponseEnabled,
+      LogRequestResponseRetentionDays:
+        props.defaultRequestResponseRetentionDays,
     },
   })
 
@@ -178,8 +190,15 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
     form.reset({
       LogConsumeEnabled: props.defaultEnabled,
       LogRequestResponseEnabled: props.defaultRequestResponseEnabled,
+      LogRequestResponseRetentionDays:
+        props.defaultRequestResponseRetentionDays,
     })
-  }, [form, props.defaultEnabled, props.defaultRequestResponseEnabled])
+  }, [
+    form,
+    props.defaultEnabled,
+    props.defaultRequestResponseEnabled,
+    props.defaultRequestResponseRetentionDays,
+  ])
 
   useEffect(() => {
     fetchServerLogInfo()
@@ -277,6 +296,17 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
         updateOption.mutateAsync({
           key: 'LogRequestResponseEnabled',
           value: values.LogRequestResponseEnabled,
+        })
+      )
+    }
+    if (
+      values.LogRequestResponseRetentionDays !==
+      props.defaultRequestResponseRetentionDays
+    ) {
+      updates.push(
+        updateOption.mutateAsync({
+          key: 'LogRequestResponseRetentionDays',
+          value: values.LogRequestResponseRetentionDays,
         })
       )
     }
@@ -409,6 +439,36 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
                 </FormControl>
                 <FormMessage />
               </SettingsSwitchItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='LogRequestResponseRetentionDays'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>
+                  {t('Request/response content retention (days)')}
+                </FormLabel>
+                <FormControl>
+                  <Input
+                    type='number'
+                    min={0}
+                    max={36500}
+                    step={1}
+                    value={field.value}
+                    onChange={(event) =>
+                      field.onChange(event.target.valueAsNumber)
+                    }
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'Automatically delete captured request and response bodies older than this many days. Set to 0 to keep them indefinitely.'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
             )}
           />
 

@@ -73,3 +73,41 @@ func TestRelayContentCaptureForwardsExactResponseWhenCaptureIsEnabled(t *testing
 	})
 	require.NoError(t, err)
 }
+
+func TestRelayContentCaptureRecordsResponsesSSEWrittenWithGinRender(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousEnabled := LogRequestResponseEnabled
+	LogRequestResponseEnabled = true
+	t.Cleanup(func() { LogRequestResponseEnabled = previousEnabled })
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest("POST", "/v1/responses", bytes.NewBufferString(`{"model":"codex","stream":true}`))
+	BeginRelayContentCapture(context)
+
+	events := []string{
+		"event: response.output_text.delta\n",
+		`data: {"type":"response.output_text.delta","delta":"完整结果"}`,
+		"event: response.completed\n",
+		`data: {"type":"response.completed","response":{"status":"completed"}}`,
+	}
+	for _, event := range events {
+		context.Render(-1, CustomEvent{Data: event})
+		context.Writer.Flush()
+	}
+
+	var capturedResponse []byte
+	err := FinishRelayContentCapture(context, func(kind string, _ string, _ int64, reader io.Reader) error {
+		if kind != RelayContentKindResponse {
+			return nil
+		}
+		var readErr error
+		capturedResponse, readErr = io.ReadAll(reader)
+		return readErr
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, capturedResponse)
+	assert.Equal(t, recorder.Body.Bytes(), capturedResponse)
+	assert.Contains(t, string(capturedResponse), "完整结果")
+	assert.Contains(t, string(capturedResponse), "response.completed")
+}

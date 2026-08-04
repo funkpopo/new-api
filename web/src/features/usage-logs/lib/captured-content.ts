@@ -166,35 +166,80 @@ function readRequestContent(value: unknown): string | null {
   return readTextContent(value.content)
 }
 
-function readSsePayloadContent(value: unknown): string | null {
-  if (!isRecord(value)) return null
-
-  const chatContent = readChatCompletionContent(value)
-  if (chatContent !== null) return chatContent
-
-  if (
-    value.type === 'response.output_text.delta' &&
-    typeof value.delta === 'string'
-  ) {
-    return value.delta
-  }
-  return null
-}
-
 type ParsedSseEvent = {
   complete: boolean
   content: string | null
+  completedContent: string | null
+  itemContent: string | null
+}
+
+function readSsePayload(value: unknown): Omit<ParsedSseEvent, 'complete'> {
+  const empty = {
+    content: null,
+    completedContent: null,
+    itemContent: null,
+  }
+  if (!isRecord(value)) return empty
+
+  const chatContent = readChatCompletionContent(value)
+  if (chatContent !== null) return { ...empty, content: chatContent }
+
+  if (value.type === 'response.output_text.delta') {
+    if (typeof value.delta === 'string') {
+      return { ...empty, content: value.delta }
+    }
+    if (isRecord(value.delta) && typeof value.delta.text === 'string') {
+      return { ...empty, content: value.delta.text }
+    }
+    if (typeof value.text === 'string') {
+      return { ...empty, content: value.text }
+    }
+  }
+
+  if (value.type === 'response.completed' || value.type === 'response.done') {
+    const completedContent = isRecord(value.response)
+      ? readResponsesContent(value.response)
+      : null
+    return { ...empty, completedContent }
+  }
+
+  if (
+    value.type === 'response.output_item.added' ||
+    value.type === 'response.output_item.done'
+  ) {
+    const itemContent = isRecord(value.item)
+      ? readTextContent(value.item.content)
+      : null
+    return { ...empty, itemContent }
+  }
+
+  if (
+    value.type === 'response.content_part.added' ||
+    value.type === 'response.content_part.done'
+  ) {
+    const itemContent = isRecord(value.part)
+      ? readTextContent([value.part])
+      : null
+    return { ...empty, itemContent }
+  }
+
+  return empty
 }
 
 function parseSseEvent(dataLines: string[]): ParsedSseEvent {
-  if (dataLines.length === 0) return { complete: true, content: null }
+  const empty = {
+    content: null,
+    completedContent: null,
+    itemContent: null,
+  }
+  if (dataLines.length === 0) return { complete: true, ...empty }
 
   const payload = dataLines.join('\n')
-  if (payload === '[DONE]') return { complete: true, content: null }
+  if (payload === '[DONE]') return { complete: true, ...empty }
 
   const value = parseJson(payload)
-  if (value === null) return { complete: false, content: null }
-  return { complete: true, content: readSsePayloadContent(value) }
+  if (value === null) return { complete: false, ...empty }
+  return { complete: true, ...readSsePayload(value) }
 }
 
 function extractSseContent(content: string): string | null {
@@ -202,7 +247,17 @@ function extractSseContent(content: string): string | null {
   if (!eventStream) return null
 
   const parts: string[] = []
+  const itemFallbacks: string[] = []
+  let completedFallback: string | null = null
   let dataLines: string[] = []
+  const appendEvent = (event: ParsedSseEvent) => {
+    if (!event.complete) return
+    if (event.content !== null) parts.push(event.content)
+    if (event.itemContent !== null) itemFallbacks.push(event.itemContent)
+    if (event.completedContent !== null) {
+      completedFallback = event.completedContent
+    }
+  }
   const lines = content
     .replaceAll('\r\n', '\n')
     .replaceAll('\r', '\n')
@@ -211,7 +266,7 @@ function extractSseContent(content: string): string | null {
     if (line.startsWith('data:')) {
       const previousEvent = parseSseEvent(dataLines)
       if (dataLines.length > 0 && previousEvent.complete) {
-        if (previousEvent.content !== null) parts.push(previousEvent.content)
+        appendEvent(previousEvent)
         dataLines = []
       }
       dataLines.push(line.slice(5).trimStart())
@@ -220,16 +275,17 @@ function extractSseContent(content: string): string | null {
 
     if (line === '') {
       const event = parseSseEvent(dataLines)
-      if (event.complete && event.content !== null) parts.push(event.content)
+      appendEvent(event)
       dataLines = []
     }
   }
 
   const finalEvent = parseSseEvent(dataLines)
-  if (finalEvent.complete && finalEvent.content !== null) {
-    parts.push(finalEvent.content)
-  }
-  return parts.join('')
+  appendEvent(finalEvent)
+  if (parts.length > 0) return parts.join('')
+  if (completedFallback !== null) return completedFallback
+  if (itemFallbacks.length > 0) return itemFallbacks.join('')
+  return null
 }
 
 function parseJson(content: string): unknown | null {

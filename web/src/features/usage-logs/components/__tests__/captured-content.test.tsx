@@ -97,6 +97,69 @@ describe('captured usage-log content', () => {
     )
   })
 
+  test('shows native Responses output without duplicating the completed response', () => {
+    const captured = [
+      'event: response.created',
+      'data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}',
+      '',
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"Codex 完整"}',
+      '',
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"结果"}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Codex 完整结果"}]}]}}',
+      '',
+    ].join('\n')
+
+    assert.deepEqual(
+      formatCapturedContent(captured, 'text/event-stream', 'response'),
+      {
+        content: 'Codex 完整结果',
+        renderMarkdown: true,
+      }
+    )
+  })
+
+  test('uses a completed Responses event when no text delta was captured', () => {
+    const captured = [
+      'event: response.created',
+      'data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Buffered Codex result"}]}]}}',
+      '',
+    ].join('\n')
+
+    assert.deepEqual(
+      formatCapturedContent(captured, 'text/event-stream', 'response'),
+      {
+        content: 'Buffered Codex result',
+        renderMarkdown: true,
+      }
+    )
+  })
+
+  test('keeps Responses SSE visible when the loaded segment has no output text', () => {
+    const captured = [
+      'event: response.created',
+      'data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}',
+      '',
+      'event: response.output_item.added',
+      'data: {"type":"response.output_item.added","item":{"type":"reasoning","id":"item-1"}}',
+      '',
+    ].join('\n')
+
+    assert.deepEqual(
+      formatCapturedContent(captured, 'text/event-stream', 'response'),
+      {
+        content: captured,
+        renderMarkdown: true,
+      }
+    )
+  })
+
   test('shows message content from a non-streaming chat response', () => {
     const captured = JSON.stringify({
       id: 'completion-1',

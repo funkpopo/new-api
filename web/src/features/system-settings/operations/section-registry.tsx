@@ -100,6 +100,11 @@ const OPERATIONS_SECTIONS = [
       <LogSettingsSection
         defaultValues={{
           LogConsumeEnabled: Boolean(settings.LogConsumeEnabled),
+          LogRequestResponseEnabled: Boolean(
+            settings.LogRequestResponseEnabled
+          ),
+          LogRequestResponseRetentionDays:
+            settings.LogRequestResponseRetentionDays ?? 0,
           'log_setting.user_export_enabled':
             settings['log_setting.user_export_enabled'] ?? true,
           'log_setting.max_range_days':

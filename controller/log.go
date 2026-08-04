@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -12,6 +13,21 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+func GetLogContent(c *gin.Context) {
+	page, _ := strconv.Atoi(c.Query("page"))
+	pageSize, _ := strconv.Atoi(c.Query("page_size"))
+	content, err := model.GetLogContentPage(c.Param("request_id"), c.Query("kind"), page, pageSize)
+	if err != nil {
+		if errors.Is(err, model.ErrLogContentNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"success": false, "message": err.Error()})
+			return
+		}
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, content)
+}
 
 // logFilterFromQuery reads the log search shared by the log list and the log
 // export. Username and channel are read only for administrators.

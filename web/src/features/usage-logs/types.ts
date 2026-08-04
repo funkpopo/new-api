@@ -135,6 +135,7 @@ export interface LogOtherData {
     admin_id?: number | string
     admin_role?: number
     auth_method?: 'session' | 'access_token' | string
+    request_response_capture?: boolean
     // Quota saturation marker: set when a quota conversion clamped at the
     // supported single-request bound (overflow/underflow) or hit a NaN fallback while computing
     // this request's charge. Admin-only (nested under admin_info).
@@ -448,6 +449,25 @@ export interface GetLogsResponse {
     page: number
     page_size: number
   }
+}
+
+export type LogContentKind = 'request' | 'response'
+
+export interface LogContentPage {
+  kind: LogContentKind
+  content_type: string
+  encoding: 'base64'
+  chunks: string[]
+  page: number
+  page_size: number
+  total_chunks: number
+  total_size: number
+}
+
+export interface GetLogContentResponse {
+  success: boolean
+  message?: string
+  data: LogContentPage
 }
 
 export interface GetLogStatsParams {

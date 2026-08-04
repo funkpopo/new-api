@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"maps"
 	"strconv"
 	"strings"
@@ -51,6 +52,8 @@ func InitOptionMap() {
 	common.OptionMap["AutomaticDisableChannelEnabled"] = strconv.FormatBool(common.AutomaticDisableChannelEnabled)
 	common.OptionMap["AutomaticEnableChannelEnabled"] = strconv.FormatBool(common.AutomaticEnableChannelEnabled)
 	common.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(common.LogConsumeEnabled)
+	common.OptionMap["LogRequestResponseEnabled"] = strconv.FormatBool(common.LogRequestResponseEnabled)
+	common.OptionMap["LogRequestResponseRetentionDays"] = strconv.Itoa(common.LogRequestResponseRetentionDays)
 	common.OptionMap["DisplayInCurrencyEnabled"] = strconv.FormatBool(common.DisplayInCurrencyEnabled)
 	common.OptionMap["DisplayTokenStatEnabled"] = strconv.FormatBool(common.DisplayTokenStatEnabled)
 	common.OptionMap["DrawingEnabled"] = strconv.FormatBool(common.DrawingEnabled)
@@ -231,6 +234,12 @@ func validateOptionValue(key string, value string) error {
 	if key == legacyAccessTokenRetireAtKey {
 		return errLegacyRetireAtReadOnly
 	}
+	if key == "LogRequestResponseRetentionDays" {
+		days, err := strconv.Atoi(value)
+		if err != nil || days < 0 || days > 36500 {
+			return fmt.Errorf("request and response content retention days must be between 0 and 36500")
+		}
+	}
 	if err := operation_setting.ValidateQuotaOption(key, value); err != nil {
 		return err
 	}
@@ -375,6 +384,9 @@ func updateOptionMap(key string, value string) (err error) {
 			common.ImageDownloadPermission = intValue
 		}
 	}
+	if key == "LogRequestResponseRetentionDays" {
+		common.LogRequestResponseRetentionDays, _ = strconv.Atoi(value)
+	}
 	if strings.HasSuffix(key, "Enabled") || key == "DefaultCollapseSidebar" || key == "DefaultUseAutoGroup" || key == "SMTPForceAuthLogin" || key == "SMTPInsecureSkipVerify" {
 		boolValue := value == "true"
 		switch key {
@@ -406,6 +418,8 @@ func updateOptionMap(key string, value string) (err error) {
 			common.AutomaticEnableChannelEnabled = boolValue
 		case "LogConsumeEnabled":
 			common.LogConsumeEnabled = boolValue
+		case "LogRequestResponseEnabled":
+			common.LogRequestResponseEnabled = boolValue
 		case "DisplayInCurrencyEnabled":
 			// 兼容旧字段：同步到新配置 general_setting.quota_display_type（运行时生效）
 			// true -> USD, false -> TOKENS

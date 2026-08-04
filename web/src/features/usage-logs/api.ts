@@ -27,10 +27,12 @@ import type {
   GetLogsResponse,
   GetLogStatsParams,
   GetLogStatsResponse,
+  GetLogContentResponse,
   GetMidjourneyLogsParams,
   GetTaskLogsParams,
   TaskArtifactsResponse,
   UserInfo,
+  LogContentKind,
 } from './types'
 
 // ============================================================================
@@ -87,6 +89,19 @@ export const getLogStats = (params: GetLogStatsParams = {}) =>
 export const getUserLogStats = (
   params: Omit<GetLogStatsParams, 'username' | 'channel'> = {}
 ) => fetchLogStats('/api/log', params, false)
+
+export async function getLogContent(
+  requestId: string,
+  kind: LogContentKind,
+  page: number,
+  pageSize: number
+): Promise<GetLogContentResponse> {
+  const params = buildQueryParams({ kind, page, page_size: pageSize })
+  const res = await api.get(
+    `/api/log/${encodeURIComponent(requestId)}/content?${params}`
+  )
+  return res.data
+}
 
 /**
  * Stream the logs matching params, newest first. The server sends one JSON

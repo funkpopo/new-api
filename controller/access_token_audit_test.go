@@ -39,7 +39,7 @@ func setupAccessTokenAudit(t *testing.T) (*model.User, string) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, i18n.Init())
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.Log{}, &model.AuditLog{}, &model.CasbinRule{}, &model.AuthzRole{}, &model.UserAccessToken{}, &model.Option{},
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.Log{}, &model.LogContentChunk{}, &model.AuditLog{}, &model.CasbinRule{}, &model.AuthzRole{}, &model.UserAccessToken{}, &model.Option{},
 		&model.AuthFlow{}, &model.TwoFA{}, &model.TwoFABackupCode{}, &model.PasskeyCredential{}, &model.UserOAuthBinding{}))
 	model.DB, model.LOG_DB = db, db
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
@@ -834,6 +834,9 @@ func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
 		path := t.TempDir() + "/audit.db"
 		db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
 		require.NoError(t, err)
+		connection, err := db.DB()
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, connection.Close()) })
 		return db, path
 	}
 	require.NotEmpty(t, dsn)
@@ -1076,6 +1079,9 @@ func TestAuditDatabaseMatrix(t *testing.T) {
 					}
 					for range 2 {
 						require.NoError(t, model.InitDB())
+						connection, err := model.DB.DB()
+						require.NoError(t, err)
+						t.Cleanup(func() { assert.NoError(t, connection.Close()) })
 						require.NoError(t, model.InitLogDB())
 					}
 					if !upgrade {

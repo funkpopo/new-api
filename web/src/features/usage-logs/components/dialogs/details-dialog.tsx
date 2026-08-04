@@ -93,6 +93,7 @@ import {
 import { USAGE_BILLING_PATH, type LogOtherData } from '../../types'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
+import { CapturedContentSection } from './captured-content-section'
 import { DetailRow, DetailSection } from './log-detail-layout'
 
 // Maps a channel-update changed-field token (as recorded by the backend audit)
@@ -506,6 +507,10 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const showAdminIp =
     !!props.log.ip && (showTiming || (props.isAdmin && isTopup))
   const adminInfo = other?.admin_info
+  const hasCapturedContent =
+    props.isAdmin &&
+    adminInfo?.request_response_capture === true &&
+    !!props.log.request_id
   const topupAuditFields =
     isTopup && props.isAdmin && adminInfo
       ? ([
@@ -646,7 +651,9 @@ export function DetailsDialog(props: DetailsDialogProps) {
       contentClassName={cn(
         'min-w-0 overflow-hidden',
         'max-sm:max-h-(--dialog-available-height) max-sm:w-[calc(100vw-1.5rem)] max-sm:max-w-[calc(100vw-1.5rem)] max-sm:p-4',
-        isTieredBilling ? 'sm:max-w-4xl lg:max-w-5xl' : 'sm:max-w-lg'
+        isTieredBilling || hasCapturedContent
+          ? 'sm:max-w-4xl lg:max-w-5xl'
+          : 'sm:max-w-lg'
       )}
       headerClassName='max-sm:gap-1'
       titleClassName='flex items-center gap-2 text-base'
@@ -798,6 +805,24 @@ export function DetailsDialog(props: DetailsDialogProps) {
               </div>
             </div>
           </DetailSection>
+        )}
+
+        {hasCapturedContent && props.log.request_id && (
+          <CapturedContentSection
+            label={t('Request Content')}
+            requestId={props.log.request_id}
+            kind='request'
+            enabled={props.open}
+          />
+        )}
+
+        {hasCapturedContent && props.log.request_id && (
+          <CapturedContentSection
+            label={t('Response Content')}
+            requestId={props.log.request_id}
+            kind='response'
+            enabled={props.open}
+          />
         )}
 
         {/* Quota saturation marker (admin only) */}

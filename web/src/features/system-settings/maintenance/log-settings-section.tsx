@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
+import type { TFunction } from 'i18next'
 import { useEffect, useId, useMemo } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -48,18 +49,27 @@ import { safeNumberFieldProps } from '../utils/numeric-field'
 import { HistoryLogCleanup } from './history-log-cleanup'
 import { ServerLogFiles } from './server-log-files'
 
-const logSettingsSchema = z.object({
-  LogConsumeEnabled: z.boolean(),
-  log_setting: z.object({
-    user_export_enabled: z.boolean(),
-    max_range_days: z.number().int().min(1),
-  }),
-})
+const createLogSettingsSchema = (t: TFunction) =>
+  z.object({
+    LogRequestResponseEnabled: z.boolean(),
+    LogRequestResponseRetentionDays: z
+      .number()
+      .int(t('Enter a whole number from 0 to 36500.'))
+      .min(0, t('Enter a whole number from 0 to 36500.'))
+      .max(36500, t('Enter a whole number from 0 to 36500.')),
+    LogConsumeEnabled: z.boolean(),
+    log_setting: z.object({
+      user_export_enabled: z.boolean(),
+      max_range_days: z.number().int().min(1),
+    }),
+  })
 
-type LogSettingsFormValues = z.infer<typeof logSettingsSchema>
+type LogSettingsFormValues = z.infer<ReturnType<typeof createLogSettingsSchema>>
 
 type LogSettingsSectionProps = {
   defaultValues: {
+    LogRequestResponseEnabled: boolean
+    LogRequestResponseRetentionDays: number
     LogConsumeEnabled: boolean
     'log_setting.user_export_enabled': boolean
     'log_setting.max_range_days': number
@@ -69,11 +79,15 @@ type LogSettingsSectionProps = {
 export function LogSettingsSection(props: LogSettingsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
+  const logSettingsSchema = useMemo(() => createLogSettingsSchema(t), [t])
   const recordingTitleId = useId()
   const searchTitleId = useId()
   const formDefaults = useMemo<LogSettingsFormValues>(
     () => ({
       LogConsumeEnabled: props.defaultValues.LogConsumeEnabled,
+      LogRequestResponseEnabled: props.defaultValues.LogRequestResponseEnabled,
+      LogRequestResponseRetentionDays:
+        props.defaultValues.LogRequestResponseRetentionDays,
       log_setting: {
         user_export_enabled:
           props.defaultValues['log_setting.user_export_enabled'],
@@ -94,6 +108,11 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
   const onSubmit = async (values: LogSettingsFormValues) => {
     const changes = [
       ['LogConsumeEnabled', values.LogConsumeEnabled],
+      ['LogRequestResponseEnabled', values.LogRequestResponseEnabled],
+      [
+        'LogRequestResponseRetentionDays',
+        values.LogRequestResponseRetentionDays,
+      ],
       [
         'log_setting.user_export_enabled',
         values.log_setting.user_export_enabled,
@@ -144,6 +163,61 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
                   </FormControl>
                   <FormMessage />
                 </SettingsSwitchItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='LogRequestResponseEnabled'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>
+                      {t('Record request and response content')}
+                    </FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Store complete client request bodies and server responses in usage log details. Content may contain sensitive data and increases log storage usage.'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </SettingsSwitchItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='LogRequestResponseRetentionDays'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>
+                    {t('Request/response content retention (days)')}
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={0}
+                      max={36500}
+                      step={1}
+                      value={field.value}
+                      onChange={(event) =>
+                        field.onChange(event.target.valueAsNumber)
+                      }
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Automatically delete captured request and response bodies older than this many days. Set to 0 to keep them indefinitely.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
               )}
             />
           </div>

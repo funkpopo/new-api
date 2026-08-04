@@ -42,6 +42,8 @@ function Fixture() {
         <LogSettingsSection
           defaultValues={{
             LogConsumeEnabled: true,
+            LogRequestResponseEnabled: false,
+            LogRequestResponseRetentionDays: 7,
             'log_setting.user_export_enabled': true,
             'log_setting.max_range_days': 30,
           }}
@@ -90,7 +92,7 @@ test('the page shows the four log modules in order, each with its own controls',
     'Server Log Management',
   ])
   const recording = screen.getByRole('group', { name: 'Log recording' })
-  expect(within(recording).getAllByRole('switch')).toHaveLength(1)
+  expect(within(recording).getAllByRole('switch')).toHaveLength(2)
   expect(
     within(recording).getByRole('switch', { name: 'Record quota usage' })
   ).toBeVisible()
@@ -182,3 +184,47 @@ test('a time range under one day shows a field error and is not saved', async ()
   await waitFor(() => expect(days).toHaveAttribute('aria-invalid', 'true'))
   expect(api.put).not.toHaveBeenCalled()
 })
+
+test('saving capture settings preserves the independent log export settings', async () => {
+  const user = userEvent.setup()
+  await renderSettings()
+
+  await user.click(
+    screen.getByRole('switch', { name: 'Record request and response content' })
+  )
+  fireEvent.change(
+    screen.getByRole('spinbutton', {
+      name: 'Request/response content retention (days)',
+    }),
+    { target: { value: '14' } }
+  )
+  await user.click(screen.getByRole('button', { name: 'Save log settings' }))
+
+  await waitFor(() => expect(api.put).toHaveBeenCalledTimes(2))
+  expect(api.put).toHaveBeenCalledWith('/api/option/', {
+    key: 'LogRequestResponseEnabled',
+    value: true,
+  })
+  expect(api.put).toHaveBeenCalledWith('/api/option/', {
+    key: 'LogRequestResponseRetentionDays',
+    value: 14,
+  })
+})
+
+test.each(['-1', '1.5', '36501'])(
+  'invalid capture retention %s is rejected without saving',
+  async (value) => {
+    const user = userEvent.setup()
+    await renderSettings()
+    const retention = screen.getByRole('spinbutton', {
+      name: 'Request/response content retention (days)',
+    })
+    fireEvent.change(retention, { target: { value } })
+    await user.click(screen.getByRole('button', { name: 'Save log settings' }))
+
+    await waitFor(() =>
+      expect(retention).toHaveAttribute('aria-invalid', 'true')
+    )
+    expect(api.put).not.toHaveBeenCalled()
+  }
+)

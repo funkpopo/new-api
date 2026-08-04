@@ -67,6 +67,8 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 }
 
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
+	common.BeginRelayContentCapture(c)
+	defer model.PersistRelayContentCapture(c)
 
 	requestId := c.GetString(common.RequestIdKey)
 	//group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
@@ -299,6 +301,8 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 }
 
 func RelayMidjourney(c *gin.Context) {
+	common.BeginRelayContentCapture(c)
+	defer model.PersistRelayContentCapture(c)
 	policy := service.RequestPolicy(c)
 	defer func() {
 		if policy.Attempts > 0 && !policy.Successful {
@@ -429,6 +433,8 @@ type taskSubmissionOutcome struct {
 }
 
 func RelayTask(c *gin.Context) {
+	common.BeginRelayContentCapture(c)
+	defer model.PersistRelayContentCapture(c)
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
 		respondTaskSubmissionError(c, &taskdto.TaskError{

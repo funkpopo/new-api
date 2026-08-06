@@ -91,21 +91,35 @@ type LogContentPage struct {
 	TotalSize   int64    `json:"total_size"`
 }
 
+func discardRelayContentCapture(c *gin.Context) {
+	_ = common.FinishRelayContentCapture(c, nil)
+}
+
 // PersistRelayContentCapture runs after the relay handler has finished writing
 // its response, ensuring error JSON and the final streaming frame are included.
+// When LogRequestResponseEnabled is off or capture was never started for this
+// request, this is a no-op and must not write log_content_chunks rows.
 func PersistRelayContentCapture(c *gin.Context) {
 	if c == nil {
 		return
 	}
+	// Fast path: skip all DB work when capture is disabled or was never armed.
+	// Finish still runs so any in-flight temp files are cleaned up, but with a
+	// nil persist callback nothing is written — including after a runtime disable.
+	if !common.LogRequestResponseEnabled || !common.RelayContentCaptureActive(c) {
+		discardRelayContentCapture(c)
+		return
+	}
+
 	requestId := c.GetString(common.RequestIdKey)
 	if requestId == "" {
-		_ = common.FinishRelayContentCapture(c, func(_ string, _ string, _ int64, _ io.Reader) error { return nil })
+		discardRelayContentCapture(c)
 		return
 	}
 
 	var count int64
 	if err := LOG_DB.Model(&Log{}).Where("request_id = ?", requestId).Count(&count).Error; err != nil || count == 0 {
-		_ = common.FinishRelayContentCapture(c, func(_ string, _ string, _ int64, _ io.Reader) error { return nil })
+		discardRelayContentCapture(c)
 		if err != nil {
 			logger.LogError(c, "failed to locate usage log for captured content: "+err.Error())
 		}
@@ -114,6 +128,11 @@ func PersistRelayContentCapture(c *gin.Context) {
 
 	persist := func(tx *gorm.DB) error {
 		return common.FinishRelayContentCapture(c, func(kind string, contentType string, totalSize int64, reader io.Reader) error {
+			// Final guard: the flag may flip off between the outer check and the
+			// actual insert (admin disable / option sync on another path).
+			if !common.LogRequestResponseEnabled {
+				return nil
+			}
 			buffer := make([]byte, logContentRawChunkSize)
 			chunks := make([]LogContentChunk, 0, logContentInsertBatch)
 			chunkIndex := 0

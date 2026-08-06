@@ -68,6 +68,20 @@ func (w *relayContentResponseWriter) WriteString(data string) (int, error) {
 	return written, err
 }
 
+// RelayContentCaptureActive reports whether this request currently has an
+// in-progress request/response capture attached to the gin context.
+func RelayContentCaptureActive(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	value, exists := c.Get(relayContentCaptureContextKey)
+	if !exists {
+		return false
+	}
+	capture, ok := value.(*relayContentCapture)
+	return ok && capture != nil
+}
+
 // BeginRelayContentCapture starts lossless request/response capture for a relay.
 // The response is spooled to a private temporary file so large and streaming
 // responses do not have to remain in memory.
@@ -75,7 +89,7 @@ func BeginRelayContentCapture(c *gin.Context) {
 	if !LogRequestResponseEnabled || c == nil || c.Request == nil {
 		return
 	}
-	if _, exists := c.Get(relayContentCaptureContextKey); exists {
+	if RelayContentCaptureActive(c) {
 		return
 	}
 
@@ -112,7 +126,9 @@ func AttachRelayContentToLog(c *gin.Context, other map[string]interface{}) {
 	if c == nil || other == nil {
 		return
 	}
-	if _, exists := c.Get(relayContentCaptureContextKey); !exists {
+	// Re-check the runtime flag so a disable that lands after Begin still
+	// prevents the usage log from advertising capturable content.
+	if !LogRequestResponseEnabled || !RelayContentCaptureActive(c) {
 		return
 	}
 
@@ -126,6 +142,8 @@ func AttachRelayContentToLog(c *gin.Context, other map[string]interface{}) {
 
 // FinishRelayContentCapture exposes both complete streams to persist and then
 // removes the temporary response file. The callback is invoked at most once.
+// If capture was never started, or LogRequestResponseEnabled was turned off
+// before finish, captured data is discarded and persist is not called.
 func FinishRelayContentCapture(c *gin.Context, persist func(kind string, contentType string, size int64, reader io.Reader) error) error {
 	if c == nil {
 		return nil
@@ -149,6 +167,12 @@ func FinishRelayContentCapture(c *gin.Context, persist func(kind string, content
 		_ = capture.responseFile.Close()
 		_ = os.Remove(capture.responsePath)
 	}()
+
+	// Honor a runtime disable even for in-flight requests: once the admin turns
+	// capture off, do not write any further request/response bodies to storage.
+	if !LogRequestResponseEnabled || persist == nil {
+		return nil
+	}
 
 	capture.responseWriter.mu.Lock()
 	defer capture.responseWriter.mu.Unlock()

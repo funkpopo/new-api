@@ -111,3 +111,63 @@ func TestRelayContentCaptureRecordsResponsesSSEWrittenWithGinRender(t *testing.T
 	assert.Contains(t, string(capturedResponse), "完整结果")
 	assert.Contains(t, string(capturedResponse), "response.completed")
 }
+
+func TestRelayContentCaptureDoesNotStartWhenDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousEnabled := LogRequestResponseEnabled
+	LogRequestResponseEnabled = false
+	t.Cleanup(func() { LogRequestResponseEnabled = previousEnabled })
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+
+	BeginRelayContentCapture(context)
+	assert.False(t, RelayContentCaptureActive(context))
+
+	other := map[string]interface{}{}
+	AttachRelayContentToLog(context, other)
+	_, hasAdminInfo := other["admin_info"]
+	assert.False(t, hasAdminInfo)
+
+	persistCalled := false
+	err := FinishRelayContentCapture(context, func(string, string, int64, io.Reader) error {
+		persistCalled = true
+		return nil
+	})
+	require.NoError(t, err)
+	assert.False(t, persistCalled)
+}
+
+func TestRelayContentCaptureDiscardsWhenDisabledAfterBegin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousEnabled := LogRequestResponseEnabled
+	LogRequestResponseEnabled = true
+	t.Cleanup(func() { LogRequestResponseEnabled = previousEnabled })
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	context.Request.Header.Set("Content-Type", "application/json")
+
+	BeginRelayContentCapture(context)
+	require.True(t, RelayContentCaptureActive(context))
+	_, err := context.Writer.WriteString(`{"ok":true}`)
+	require.NoError(t, err)
+
+	// Admin disables capture before the request finishes.
+	LogRequestResponseEnabled = false
+
+	other := map[string]interface{}{}
+	AttachRelayContentToLog(context, other)
+	_, hasAdminInfo := other["admin_info"]
+	assert.False(t, hasAdminInfo, "usage log must not advertise capture after disable")
+
+	persistCalled := false
+	err = FinishRelayContentCapture(context, func(string, string, int64, io.Reader) error {
+		persistCalled = true
+		return nil
+	})
+	require.NoError(t, err)
+	assert.False(t, persistCalled, "disabled capture must not persist request/response bodies")
+}

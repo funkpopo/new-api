@@ -129,3 +129,95 @@ func TestRelayContentIsPersistedAndReadWithoutTruncation(t *testing.T) {
 	}
 	assert.Equal(t, responseBody, string(responseBytes))
 }
+
+func TestRelayContentNotPersistedWhenCaptureDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open("file:log-content-disabled-test?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&Log{}, &LogContentChunk{}))
+
+	previousLogDB := LOG_DB
+	previousLogDatabaseType := common.LogDatabaseType()
+	previousEnabled := common.LogRequestResponseEnabled
+	LOG_DB = db
+	common.SetLogDatabaseType(common.DatabaseTypeSQLite)
+	common.LogRequestResponseEnabled = false
+	t.Cleanup(func() {
+		LOG_DB = previousLogDB
+		common.SetLogDatabaseType(previousLogDatabaseType)
+		common.LogRequestResponseEnabled = previousEnabled
+	})
+
+	requestId := "req-disabled-content"
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`))
+	context.Request.Header.Set("Content-Type", "application/json")
+	context.Set(common.RequestIdKey, requestId)
+
+	common.BeginRelayContentCapture(context)
+	other := map[string]interface{}{}
+	common.AttachRelayContentToLog(context, other)
+	require.NoError(t, createLog(&Log{
+		RequestId: requestId,
+		CreatedAt: common.GetTimestamp(),
+		Type:      LogTypeConsume,
+		Other:     common.MapToJsonStr(other),
+	}))
+	_, err = context.Writer.WriteString(`{"id":"chatcmpl-1"}`)
+	require.NoError(t, err)
+
+	PersistRelayContentCapture(context)
+
+	var chunkCount int64
+	require.NoError(t, db.Model(&LogContentChunk{}).Count(&chunkCount).Error)
+	assert.Equal(t, int64(0), chunkCount)
+
+	_, hasAdminInfo := other["admin_info"]
+	assert.False(t, hasAdminInfo)
+}
+
+func TestRelayContentNotPersistedWhenDisabledAfterCaptureStarted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open("file:log-content-disable-midflight-test?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&Log{}, &LogContentChunk{}))
+
+	previousLogDB := LOG_DB
+	previousLogDatabaseType := common.LogDatabaseType()
+	previousEnabled := common.LogRequestResponseEnabled
+	LOG_DB = db
+	common.SetLogDatabaseType(common.DatabaseTypeSQLite)
+	common.LogRequestResponseEnabled = true
+	t.Cleanup(func() {
+		LOG_DB = previousLogDB
+		common.SetLogDatabaseType(previousLogDatabaseType)
+		common.LogRequestResponseEnabled = previousEnabled
+	})
+
+	requestId := "req-disable-midflight"
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	context.Request.Header.Set("Content-Type", "application/json")
+	context.Set(common.RequestIdKey, requestId)
+
+	common.BeginRelayContentCapture(context)
+	require.True(t, common.RelayContentCaptureActive(context))
+	_, err = context.Writer.WriteString(`{"ok":true}`)
+	require.NoError(t, err)
+
+	require.NoError(t, createLog(&Log{
+		RequestId: requestId,
+		CreatedAt: common.GetTimestamp(),
+		Type:      LogTypeConsume,
+	}))
+
+	// Simulate admin turning the setting off before the deferred persist runs.
+	common.LogRequestResponseEnabled = false
+	PersistRelayContentCapture(context)
+
+	var chunkCount int64
+	require.NoError(t, db.Model(&LogContentChunk{}).Count(&chunkCount).Error)
+	assert.Equal(t, int64(0), chunkCount)
+}

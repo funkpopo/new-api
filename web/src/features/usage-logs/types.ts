@@ -135,7 +135,7 @@ export interface LogOtherData {
     auth_method?: 'session' | 'access_token' | string
     request_response_capture?: boolean
     // Quota saturation marker: set when a quota conversion clamped at the
-    // int32 bound (overflow/underflow) or hit a NaN fallback while computing
+    // supported single-request bound (overflow/underflow) or hit a NaN fallback while computing
     // this request's charge. Admin-only (nested under admin_info).
     quota_saturation?: {
       op: string
@@ -143,6 +143,12 @@ export interface LogOtherData {
       original: number
       clamped: number
     }
+    task_plugin?: TaskPluginInfo
+  }
+  root_info?: {
+    task_plugin?: TaskPluginRuntimeInfo
+    upstream_task_id?: string
+    node_name?: string
   }
   // Language-independent operation descriptor (audit/login logs).
   // Frontend renders localized content from action + params via i18n templates.
@@ -197,6 +203,7 @@ export interface LogOtherData {
   expr_b64?: string
   matched_tier?: string
   request_rules?: RequestRuleTrace[]
+  usage_facts?: Record<string, string | number>
   reasoning_effort?: string
   image?: boolean
   image_ratio?: number
@@ -296,16 +303,77 @@ export interface TaskLog {
   task_id: string
   action: string // MUSIC, LYRICS, GENERATE, TEXT_GENERATE, etc.
   channel_id: number
+  group: string
+  quota: number
   submit_time: number // seconds
+  start_time?: number // seconds
   finish_time?: number // seconds
   progress?: string
   progress_message_en?: string
-  data?: string // JSON string
+  data?: unknown
+  properties?: {
+    input?: string
+    upstream_model_name?: string
+    origin_model_name?: string
+  }
+  legacy_video_available?: boolean
   fail_reason?: string
   status: string // NOT_START, SUBMITTED, IN_PROGRESS, SUCCESS, FAILURE, QUEUED, UNKNOWN
-  other?: string
+  admin_info?: {
+    request_id?: string
+    request_path?: string
+    task_plugin?: TaskPluginInfo
+  }
+  root_info?: {
+    task_plugin?: TaskPluginRuntimeInfo
+    upstream_task_id?: string
+    node_name?: string
+  }
   created_at?: number
   updated_at?: number
+}
+
+export interface TaskPluginInfo {
+  key: string
+  name: string
+  version?: string
+  author?: TaskPluginAuthor
+}
+
+export interface TaskPluginAuthor {
+  name: string
+  url?: string
+}
+
+export interface TaskPluginRuntimeInfo {
+  key: string
+  version: string
+  api_version: number
+  generation: number
+}
+
+export type TaskArtifactType = 'image' | 'video' | 'audio' | 'file'
+
+export interface TaskArtifact {
+  key: string
+  type: TaskArtifactType
+  mime_type?: string
+  content_url: string
+}
+
+export interface TaskArtifactProjection {
+  artifacts: TaskArtifact[]
+  legacyContentUrl?: string
+}
+
+export interface TaskArtifactsResponse {
+  success: boolean
+  message?: string
+  code?: string
+  data?: {
+    artifacts?: unknown
+    legacy_content_url?: unknown
+  }
 }
 
 // ============================================================================

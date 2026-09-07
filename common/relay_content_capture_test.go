@@ -25,8 +25,7 @@ func TestRelayContentCapturePreservesCompleteRequestAndResponse(t *testing.T) {
 	context.Request.Header.Set("Content-Type", "application/json")
 
 	BeginRelayContentCapture(context)
-	other := map[string]interface{}{}
-	AttachRelayContentToLog(context, other)
+	require.True(t, ShouldAttachRelayContentToLog(context))
 	_, err := context.Writer.WriteString(responseBody)
 	require.NoError(t, err)
 
@@ -43,10 +42,6 @@ func TestRelayContentCapturePreservesCompleteRequestAndResponse(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []byte(requestBody), captured[RelayContentKindRequest])
 	assert.Equal(t, []byte(responseBody), captured[RelayContentKindResponse])
-
-	adminInfo, ok := other["admin_info"].(map[string]interface{})
-	require.True(t, ok)
-	assert.Equal(t, true, adminInfo["request_response_capture"])
 }
 
 func TestRelayContentCaptureForwardsExactResponseWhenCaptureIsEnabled(t *testing.T) {
@@ -124,11 +119,7 @@ func TestRelayContentCaptureDoesNotStartWhenDisabled(t *testing.T) {
 
 	BeginRelayContentCapture(context)
 	assert.False(t, RelayContentCaptureActive(context))
-
-	other := map[string]interface{}{}
-	AttachRelayContentToLog(context, other)
-	_, hasAdminInfo := other["admin_info"]
-	assert.False(t, hasAdminInfo)
+	assert.False(t, ShouldAttachRelayContentToLog(context))
 
 	persistCalled := false
 	err := FinishRelayContentCapture(context, func(string, string, int64, io.Reader) error {
@@ -158,10 +149,7 @@ func TestRelayContentCaptureDiscardsWhenDisabledAfterBegin(t *testing.T) {
 	// Admin disables capture before the request finishes.
 	LogRequestResponseEnabled = false
 
-	other := map[string]interface{}{}
-	AttachRelayContentToLog(context, other)
-	_, hasAdminInfo := other["admin_info"]
-	assert.False(t, hasAdminInfo, "usage log must not advertise capture after disable")
+	assert.False(t, ShouldAttachRelayContentToLog(context), "usage log must not advertise capture after disable")
 
 	persistCalled := false
 	err = FinishRelayContentCapture(context, func(string, string, int64, io.Reader) error {

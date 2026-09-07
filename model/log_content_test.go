@@ -87,13 +87,15 @@ func TestRelayContentIsPersistedAndReadWithoutTruncation(t *testing.T) {
 	context.Set(common.RequestIdKey, requestId)
 
 	common.BeginRelayContentCapture(context)
-	other := map[string]interface{}{}
-	common.AttachRelayContentToLog(context, other)
+	other := NewLogOther()
+	if common.ShouldAttachRelayContentToLog(context) {
+		other.SetAdmin("request_response_capture", true)
+	}
 	require.NoError(t, createLog(&Log{
 		RequestId: requestId,
 		CreatedAt: common.GetTimestamp(),
 		Type:      LogTypeConsume,
-		Other:     common.MapToJsonStr(other),
+		Other:     other.JSONString(),
 	}))
 	context.Writer.Header().Set("Content-Type", "text/event-stream")
 	_, err = context.Writer.WriteString(responseBody)
@@ -156,13 +158,15 @@ func TestRelayContentNotPersistedWhenCaptureDisabled(t *testing.T) {
 	context.Set(common.RequestIdKey, requestId)
 
 	common.BeginRelayContentCapture(context)
-	other := map[string]interface{}{}
-	common.AttachRelayContentToLog(context, other)
+	other := NewLogOther()
+	if common.ShouldAttachRelayContentToLog(context) {
+		other.SetAdmin("request_response_capture", true)
+	}
 	require.NoError(t, createLog(&Log{
 		RequestId: requestId,
 		CreatedAt: common.GetTimestamp(),
 		Type:      LogTypeConsume,
-		Other:     common.MapToJsonStr(other),
+		Other:     other.JSONString(),
 	}))
 	_, err = context.Writer.WriteString(`{"id":"chatcmpl-1"}`)
 	require.NoError(t, err)
@@ -173,8 +177,7 @@ func TestRelayContentNotPersistedWhenCaptureDisabled(t *testing.T) {
 	require.NoError(t, db.Model(&LogContentChunk{}).Count(&chunkCount).Error)
 	assert.Equal(t, int64(0), chunkCount)
 
-	_, hasAdminInfo := other["admin_info"]
-	assert.False(t, hasAdminInfo)
+	assert.Nil(t, other.Snapshot()[logOtherAdminInfoKey], "disabled capture must not advertise capture")
 }
 
 func TestRelayContentNotPersistedWhenDisabledAfterCaptureStarted(t *testing.T) {

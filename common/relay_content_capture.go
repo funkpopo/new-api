@@ -120,24 +120,16 @@ func BeginRelayContentCapture(c *gin.Context) {
 	c.Set(relayContentCaptureContextKey, capture)
 }
 
-// AttachRelayContentToLog marks the admin-only portion of a usage log so the
-// UI knows that the request and response are available from the chunk API.
-func AttachRelayContentToLog(c *gin.Context, other map[string]interface{}) {
-	if c == nil || other == nil {
-		return
+// ShouldAttachRelayContentToLog reports whether the current request's usage
+// log should advertise that the request and response are available from the
+// chunk API. Callers mark that advertisement on their LogOther admin scope.
+func ShouldAttachRelayContentToLog(c *gin.Context) bool {
+	if c == nil {
+		return false
 	}
 	// Re-check the runtime flag so a disable that lands after Begin still
 	// prevents the usage log from advertising capturable content.
-	if !LogRequestResponseEnabled || !RelayContentCaptureActive(c) {
-		return
-	}
-
-	adminInfo, ok := other["admin_info"].(map[string]interface{})
-	if !ok || adminInfo == nil {
-		adminInfo = map[string]interface{}{}
-		other["admin_info"] = adminInfo
-	}
-	adminInfo["request_response_capture"] = true
+	return LogRequestResponseEnabled && RelayContentCaptureActive(c)
 }
 
 // FinishRelayContentCapture exposes both complete streams to persist and then

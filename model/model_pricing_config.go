@@ -89,6 +89,11 @@ func readModelPricingMaps(db *gorm.DB) (map[string]map[string]any, error) {
 	}
 	values := defaultPricingMaps()
 	for _, row := range rows {
+		// Legacy databases may hold an empty string for these options; treat
+		// it as unset so the engine defaults still apply.
+		if strings.TrimSpace(row.Value) == "" {
+			continue
+		}
 		var entries map[string]any
 		if err := common.UnmarshalJsonStr(row.Value, &entries); err != nil {
 			return nil, fmt.Errorf("%s: %w", row.Key, err)

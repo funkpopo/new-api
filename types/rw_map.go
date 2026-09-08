@@ -74,21 +74,24 @@ func (m *RWMap[K, V]) Len() int {
 }
 
 func LoadFromJsonString[K comparable, V any](m *RWMap[K, V], jsonStr string) error {
+	var parsed map[K]V
+	if err := common.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+		return err
+	}
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	m.data = make(map[K]V)
-	return common.Unmarshal([]byte(jsonStr), &m.data)
+	m.data = parsed
+	return nil
 }
 
 func LoadFromJsonStringWithCallback[K comparable, V any](m *RWMap[K, V], jsonStr string, onSuccess func()) error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	m.data = make(map[K]V)
-	err := common.Unmarshal([]byte(jsonStr), &m.data)
-	if err == nil && onSuccess != nil {
+	if err := LoadFromJsonString(m, jsonStr); err != nil {
+		return err
+	}
+	if onSuccess != nil {
 		onSuccess()
 	}
-	return err
+	return nil
 }
 
 func (m *RWMap[K, V]) MarshalJSONString() string {

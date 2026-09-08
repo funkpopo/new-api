@@ -102,6 +102,11 @@ func readModelPricingMaps(db *gorm.DB) (map[string]map[string]any, map[string]bo
 	existing := make(map[string]bool)
 	counts := make(map[string]int)
 	for _, row := range rows {
+		// Legacy databases may hold an empty string for these options; treat
+		// it as unset so the engine defaults still apply.
+		if strings.TrimSpace(row.Value) == "" {
+			continue
+		}
 		var entries map[string]any
 		if err := common.UnmarshalJsonStr(row.Value, &entries); err != nil {
 			return nil, nil, nil, fmt.Errorf("%s: %w", row.Key, err)

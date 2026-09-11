@@ -5,11 +5,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	builtinplugins "github.com/QuantumNous/new-api/plugins"
+	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -86,6 +91,101 @@ func TestListModelsSupportsOpenAIAndGeminiAuthentication(t *testing.T) {
 				assert.Equal(t, test.expectedObject, payload["object"])
 			}
 		})
+	}
+}
+
+func TestRelayPrivacyFilterCoversHostAndPluginRoutes(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Task{}))
+	t.Setenv("TRUSTED_PROXIES", "")
+
+	privacySetting := operation_setting.GetPrivacyFilterSetting()
+	previousPrivacySetting := *privacySetting
+	previousRegistry := jsplugin.DefaultRegistry
+	previousRateLimit := setting.ModelRequestRateLimitEnabled
+	t.Cleanup(func() {
+		*privacySetting = previousPrivacySetting
+		jsplugin.DefaultRegistry = previousRegistry
+		setting.ModelRequestRateLimitEnabled = previousRateLimit
+	})
+	setting.ModelRequestRateLimitEnabled = false
+	privacySetting.Enabled = true
+	privacySetting.GitleaksTOML = filepath.Join(t.TempDir(), "missing-rules.toml")
+
+	user := model.User{Username: "privacy-router-user", Status: common.UserStatusEnabled, Group: "default", Quota: 100}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{
+		UserId: user.Id, Key: "privacyrouterkey", Status: common.TokenStatusEnabled,
+		ExpiredTime: -1, UnlimitedQuota: true,
+	}).Error)
+	jsplugin.DefaultRegistry = jsplugin.NewRegistry()
+	source, err := builtinplugins.Source("sunoapi")
+	require.NoError(t, err)
+	_, err = jsplugin.DefaultRegistry.RegisterFactory(source, jsplugin.Options{Key: "sunoapi"})
+	require.NoError(t, err)
+
+	engine := gin.New()
+	SetRelayRouter(engine)
+	SetTaskPluginProtocolRouter(engine)
+	SetVideoRouter(engine)
+	SetTaskRouter(engine)
+	engine.NoRoute(SetPluginRouter(engine))
+
+	// Register static and plugin routes together, as startup does. A static
+	// /suno route must not displace the factory plugin or its protocol support.
+	require.Empty(t, jsplugin.DefaultRegistry.RoutingErrors())
+	_, available := jsplugin.DefaultRegistry.Get("sunoapi")
+	require.True(t, available)
+
+	for _, path := range []string{
+		"/v1/chat/completions",
+		"/v1/responses",
+		"/v1/videos",
+		"/v1/tasks/sunoapi",
+		"/suno/submit/LYRICS",
+		"/suno/fetch",
+	} {
+		t.Run(path, func(t *testing.T) {
+			// Filter initialization must fail closed before model selection or
+			// plugin decoding can cache and forward the unfiltered request.
+			body := `{"model":"suno_lyrics","prompt":"contact review@example.com","input":"contact review@example.com","messages":[{"role":"user","content":"contact review@example.com"}]}`
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer sk-privacyrouterkey")
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, request)
+			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+			var response struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.Equal(t, "privacy_filter_failed", response.Error.Code)
+
+			request = httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			recorder = httptest.NewRecorder()
+			engine.ServeHTTP(recorder, request)
+			assert.Equal(t, http.StatusUnauthorized, recorder.Code, recorder.Body.String())
+			assert.NotContains(t, recorder.Body.String(), "privacy_filter_failed")
+		})
+	}
+
+	// Native batch queries must still run through the Suno decoder/renderer,
+	// both with filtering disabled and with the built-in rules enabled.
+	for _, enabled := range []bool{false, true} {
+		privacySetting.Enabled = enabled
+		if enabled {
+			privacySetting.GitleaksTOML = ""
+		}
+		request := httptest.NewRequest(http.MethodPost, "/suno/fetch", strings.NewReader(`{"ids":[],"prompt":"contact review@example.com"}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer sk-privacyrouterkey")
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, request)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.JSONEq(t, `{"code":"success","message":"","data":[]}`, recorder.Body.String())
 	}
 }
 

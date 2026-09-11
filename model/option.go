@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -59,8 +60,6 @@ func InitOptionMap() {
 	common.OptionMap["TaskEnabled"] = strconv.FormatBool(common.TaskEnabled)
 	common.OptionMap["TaskPluginEnabled"] = strconv.FormatBool(constant.TaskPluginEnabled)
 	jsplugin.DefaultRegistry.SetEnabled(constant.TaskPluginEnabled)
-	common.OptionMap["TaskPluginOverrideEnabled"] = strconv.FormatBool(constant.TaskPluginOverrideEnabled)
-	jsplugin.DefaultRegistry.SetOverrideEnabled(constant.TaskPluginOverrideEnabled)
 	common.OptionMap[setting.TaskPluginMarketplaceSourcesKey] = setting.TaskPluginMarketplaceSources2JsonString()
 	common.OptionMap[setting.TaskPluginDisabledFactoryKeysKey] = "[]"
 	jsplugin.DefaultRegistry.SetDisabledFactoryKeys(nil)
@@ -192,9 +191,7 @@ func InitOptionMap() {
 
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()
-	for k, v := range modelConfigs {
-		common.OptionMap[k] = v
-	}
+	maps.Copy(common.OptionMap, modelConfigs)
 
 	common.OptionMapRWMutex.Unlock()
 	loadOptionsFromDatabase()
@@ -382,9 +379,6 @@ func updateOptionMap(key string, value string) (err error) {
 		case "TaskPluginEnabled":
 			constant.TaskPluginEnabled = boolValue
 			jsplugin.DefaultRegistry.SetEnabled(boolValue)
-		case "TaskPluginOverrideEnabled":
-			constant.TaskPluginOverrideEnabled = boolValue
-			jsplugin.DefaultRegistry.SetOverrideEnabled(boolValue)
 		case "DataExportEnabled":
 			common.DataExportEnabled = boolValue
 		case "DefaultCollapseSidebar":

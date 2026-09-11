@@ -21,7 +21,7 @@ func TestReadModelPricingMapsWithLegacyEmptyOptionValues(t *testing.T) {
 	require.NoError(t, DB.Create(&Option{Key: "ModelRatio", Value: "   "}).Error)
 	require.NoError(t, DB.Create(&Option{Key: "ModelPrice", Value: `{"gpt-4o":2.5}`}).Error)
 
-	values, err := readModelPricingMaps(DB)
+	values, _, _, err := readModelPricingMaps(DB)
 	require.NoError(t, err)
 
 	// Empty/blank values keep engine defaults exactly (no extra entries).

@@ -11,8 +11,9 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -52,19 +53,22 @@ func filterJSONBody(c *gin.Context) error {
 	if err != nil {
 		return err
 	}
-	body, err := storage.Bytes()
+	maxMB := constant.MaxRequestBodyMB
+	if maxMB <= 0 {
+		maxMB = 128 // Same fallback as common.GetRequestBody.
+	}
+	redacted, stats, err := service.RedactPrivacyJSONStorage(storage, int64(maxMB)<<20)
 	if err != nil {
 		return err
 	}
-	redacted, err := service.ApplyPrivacyFilterToJSON(c, body)
-	if err != nil {
-		return err
+	if redacted != storage {
+		c.Set(common.KeyBodyStorage, redacted)
+		_ = storage.Close()
+		c.Request.ContentLength = redacted.Size()
 	}
-	if bytes.Equal(body, redacted) {
-		resetRequestBody(c, storage)
-		return nil
-	}
-	return replaceRequestBody(c, redacted, "")
+	resetRequestBody(c, redacted)
+	service.RecordPrivacyFilterStats(c, stats)
+	return nil
 }
 
 func filterURLEncodedBody(c *gin.Context) error {

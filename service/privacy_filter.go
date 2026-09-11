@@ -1,16 +1,18 @@
 package service
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
-	"strconv"
+	"io"
 	"strings"
 	"sync"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	privacyfilter "privacyfilter/filter"
 )
 
@@ -63,23 +65,75 @@ func RedactPrivacyJSON(data []byte) ([]byte, PrivacyFilterStats, error) {
 		return nil, PrivacyFilterStats{}, fmt.Errorf("invalid json")
 	}
 
-	root := gjson.ParseBytes(data)
-	stats, replacements, err := collectPrivacyJSONReplacements(root, "", "")
-	if err != nil {
+	redactor := privacyJSONRedactor{}
+	if err := redactor.collect(gjson.ParseBytes(data), ""); err != nil {
 		return nil, PrivacyFilterStats{}, err
 	}
-	if !stats.Hit {
-		return data, stats, nil
+	if !redactor.stats.Hit {
+		return data, redactor.stats, nil
 	}
 
-	redacted := data
-	for _, replacement := range replacements {
-		redacted, err = sjson.SetBytes(redacted, replacement.path, replacement.value)
+	size := len(data)
+	for _, replacement := range redactor.replacements {
+		size += len(replacement.Value) - int(replacement.End-replacement.Start)
+	}
+	redacted := make([]byte, 0, size)
+	var offset int64
+	for _, replacement := range redactor.replacements {
+		redacted = append(redacted, data[offset:replacement.Start]...)
+		redacted = append(redacted, replacement.Value...)
+		offset = replacement.End
+	}
+	redacted = append(redacted, data[offset:]...)
+	return redacted, redactor.stats, nil
+}
+
+// RedactPrivacyJSONStorage leaves ownership of the input with the caller and
+// returns it unchanged when there are no hits. Disk input is traversed token by
+// token; unselected strings are validated in bounded chunks. Only keys, selected
+// strings, scalar literals and replacement text need to be materialized.
+func RedactPrivacyJSONStorage(storage common.BodyStorage, maxBytes int64) (common.BodyStorage, PrivacyFilterStats, error) {
+	if storage.Size() > maxBytes {
+		return nil, PrivacyFilterStats{}, common.ErrRequestBodyTooLarge
+	}
+	if !IsPrivacyFilterEnabled() || storage.Size() == 0 {
+		return storage, PrivacyFilterStats{}, nil
+	}
+	redactor := privacyJSONRedactor{}
+	if !storage.IsDisk() {
+		data, err := storage.Bytes()
 		if err != nil {
 			return nil, PrivacyFilterStats{}, err
 		}
+		if !gjson.ValidBytes(data) {
+			return nil, PrivacyFilterStats{}, fmt.Errorf("invalid json")
+		}
+		if err := redactor.collect(gjson.ParseBytes(data), ""); err != nil {
+			return nil, PrivacyFilterStats{}, err
+		}
+	} else {
+		reader, err := storage.NewReader()
+		if err != nil {
+			return nil, PrivacyFilterStats{}, err
+		}
+		defer reader.Close()
+		scanner := privacyJSONScanner{reader: bufio.NewReaderSize(reader, 32<<10)}
+		token, err := scanner.next(false)
+		if err != nil {
+			return nil, PrivacyFilterStats{}, err
+		}
+		if err := redactor.collectStream(&scanner, token, ""); err != nil {
+			return nil, PrivacyFilterStats{}, err
+		}
+		if _, err := scanner.next(false); !errors.Is(err, io.EOF) {
+			return nil, PrivacyFilterStats{}, fmt.Errorf("invalid json: expected end of input")
+		}
 	}
-	return redacted, stats, nil
+	result, err := common.ReplaceBodyStorage(storage, redactor.replacements, maxBytes)
+	if err != nil {
+		return nil, PrivacyFilterStats{}, err
+	}
+	return result, redactor.stats, nil
 }
 
 func ApplyPrivacyFilterToFormValues(c *gin.Context, values map[string][]string) error {
@@ -147,84 +201,54 @@ func (s *PrivacyFilterStats) Add(other PrivacyFilterStats) {
 	s.Count += other.Count
 }
 
-type privacyJSONReplacement struct {
-	path  string
-	value string
+type privacyJSONRedactor struct {
+	filter       *privacyfilter.Filter
+	stats        PrivacyFilterStats
+	replacements []common.BodyReplacement
 }
 
-func collectPrivacyJSONReplacements(value gjson.Result, path string, parentKey string) (PrivacyFilterStats, []privacyJSONReplacement, error) {
-	if value.IsObject() {
-		var total PrivacyFilterStats
-		var replacements []privacyJSONReplacement
+func (r *privacyJSONRedactor) collect(value gjson.Result, parentKey string) error {
+	if value.IsObject() || value.IsArray() {
+		object := value.IsObject()
 		var walkErr error
 		value.ForEach(func(key, child gjson.Result) bool {
-			keyName := key.String()
-			childStats, childReplacements, err := collectPrivacyJSONReplacements(child, joinPrivacyJSONPath(path, escapeSJSONPathSegment(keyName)), keyName)
-			if err != nil {
-				walkErr = err
-				return false
+			childKey := parentKey
+			if object {
+				childKey = key.String()
 			}
-			total.Add(childStats)
-			replacements = append(replacements, childReplacements...)
-			return true
+			walkErr = r.collect(child, childKey)
+			return walkErr == nil
 		})
-		return total, replacements, walkErr
+		return walkErr
 	}
-
-	if value.IsArray() {
-		var total PrivacyFilterStats
-		var replacements []privacyJSONReplacement
-		var walkErr error
-		index := 0
-		value.ForEach(func(_, child gjson.Result) bool {
-			childStats, childReplacements, err := collectPrivacyJSONReplacements(child, joinPrivacyJSONPath(path, strconv.Itoa(index)), parentKey)
-			index++
-			if err != nil {
-				walkErr = err
-				return false
-			}
-			total.Add(childStats)
-			replacements = append(replacements, childReplacements...)
-			return true
-		})
-		return total, replacements, walkErr
-	}
-
 	if value.Type == gjson.String && shouldRedactPrivacyValue(parentKey) {
-		redacted, stats, err := RedactPrivacyText(value.String())
+		return r.redact(value.String(), int64(value.Index), int64(value.Index+len(value.Raw)))
+	}
+	return nil
+}
+
+func (r *privacyJSONRedactor) redact(text string, start, end int64) error {
+	if text == "" {
+		return nil
+	}
+	if r.filter == nil {
+		var err error
+		r.filter, err = getPrivacyFilter()
 		if err != nil {
-			return PrivacyFilterStats{}, nil, err
+			return err
 		}
-		if stats.Hit {
-			return stats, []privacyJSONReplacement{{path: path, value: redacted}}, nil
-		}
-		return stats, nil, nil
 	}
-
-	return PrivacyFilterStats{}, nil, nil
-}
-
-func joinPrivacyJSONPath(parent string, child string) string {
-	if parent == "" {
-		return child
+	result := r.filter.Redact(text)
+	if !result.Hit {
+		return nil
 	}
-	return parent + "." + child
-}
-
-func escapeSJSONPathSegment(segment string) string {
-	if !strings.ContainsAny(segment, ".*?\\") {
-		return segment
+	encoded, err := common.Marshal(result.Redacted)
+	if err != nil {
+		return err
 	}
-	var builder strings.Builder
-	builder.Grow(len(segment) + 4)
-	for i := 0; i < len(segment); i++ {
-		switch segment[i] {
-		case '.', '*', '?', '\\':
-			builder.WriteByte('\\')
-		}
-		builder.WriteByte(segment[i])
-	}
-	return builder.String()
+	r.stats.Add(PrivacyFilterStats{Hit: true, Count: result.Count})
+	r.replacements = append(r.replacements, common.BodyReplacement{Start: start, End: end, Value: encoded})
+	return nil
 }
 
 func shouldRedactPrivacyValue(key string) bool {

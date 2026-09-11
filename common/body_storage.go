@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -27,6 +28,108 @@ type BodyStorage interface {
 	// returned reader releases only that reader, never the storage itself;
 	// after the storage has been closed, NewReader returns ErrStorageClosed.
 	NewReader() (io.ReadCloser, error)
+}
+
+// BodyReplacement replaces [Start, End) in the original payload. Replacements
+// must be ordered and non-overlapping; all other bytes are copied verbatim.
+type BodyReplacement struct {
+	Start int64
+	End   int64
+	Value []byte
+}
+
+// ReplaceBodyStorage builds a new payload without materializing disk-backed
+// input in memory. The caller owns both storages; on failure the original is
+// still usable. With no replacements it returns the original storage.
+func ReplaceBodyStorage(storage BodyStorage, replacements []BodyReplacement, maxBytes int64) (BodyStorage, error) {
+	size := storage.Size()
+	if size > maxBytes {
+		return nil, ErrRequestBodyTooLarge
+	}
+	var end int64
+	// Subtract all removed bytes first so shrinking later fields can offset
+	// expansion of earlier fields without a false size-limit failure.
+	for _, replacement := range replacements {
+		if replacement.Start < end || replacement.End < replacement.Start || replacement.End > storage.Size() {
+			return nil, fmt.Errorf("invalid body replacement range")
+		}
+		size -= replacement.End - replacement.Start
+		end = replacement.End
+	}
+	for _, replacement := range replacements {
+		if int64(len(replacement.Value)) > maxBytes-size {
+			return nil, ErrRequestBodyTooLarge
+		}
+		size += int64(len(replacement.Value))
+	}
+	if len(replacements) == 0 {
+		return storage, nil
+	}
+	if !storage.IsDisk() {
+		data, err := storage.Bytes()
+		if err != nil {
+			return nil, err
+		}
+		result := make([]byte, 0, size)
+		var offset int64
+		for _, replacement := range replacements {
+			result = append(result, data[offset:replacement.Start]...)
+			result = append(result, replacement.Value...)
+			offset = replacement.End
+		}
+		result = append(result, data[offset:]...)
+		return CreateBodyStorage(result)
+	}
+	reader, err := storage.NewReader()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	patched := &bodyReplacementReader{source: bufio.NewReaderSize(reader, 32<<10), replacements: replacements}
+	result, err := CreateBodyStorageFromReader(patched, size, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	if result.Size() != size {
+		result.Close()
+		return nil, io.ErrUnexpectedEOF
+	}
+	return result, nil
+}
+
+type bodyReplacementReader struct {
+	source       io.Reader
+	replacements []BodyReplacement
+	offset       int64
+	pending      []byte
+}
+
+func (r *bodyReplacementReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for {
+		if len(r.pending) > 0 {
+			n := copy(p, r.pending)
+			r.pending = r.pending[n:]
+			return n, nil
+		}
+		if len(r.replacements) == 0 {
+			return r.source.Read(p)
+		}
+		replacement := r.replacements[0]
+		if r.offset < replacement.Start {
+			n, err := r.source.Read(p[:min(int64(len(p)), replacement.Start-r.offset)])
+			r.offset += int64(n)
+			return n, err
+		}
+		if _, err := io.CopyN(io.Discard, r.source, replacement.End-r.offset); err != nil {
+			return 0, err
+		}
+		r.offset = replacement.End
+		r.pending = replacement.Value
+		r.replacements = r.replacements[1:]
+	}
 }
 
 // ReplayableBody is an outbound request body that can report its byte size and
@@ -164,7 +267,13 @@ func newDiskStorageFromReader(reader io.Reader, maxBytes int64, cachePath string
 	}
 
 	// 从 reader 读取并写入文件
-	written, err := io.Copy(file, io.LimitReader(reader, maxBytes+1))
+	// Range-based rewrites can produce many short reads. Coalesce them before
+	// writing so each replacement does not become a separate disk write.
+	writer := bufio.NewWriterSize(file, 32<<10)
+	written, err := io.Copy(writer, io.LimitReader(reader, maxBytes+1))
+	if err == nil {
+		err = writer.Flush()
+	}
 	if err != nil {
 		file.Close()
 		os.Remove(filePath)

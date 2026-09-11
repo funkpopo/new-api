@@ -179,7 +179,6 @@ func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner Res
 }
 
 func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []byte, envelope responsesWSCreateEvent, streamID string, requestID string) {
-	create, parseErr := normalizeResponsesWSCreateEvent(message, envelope, streamID)
 	var apiErr *types.NewAPIError
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -219,8 +218,22 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 	request.ContentLength = int64(len(message))
 	request.Header.Set("Content-Type", "application/json")
 	apiErr = s.runner(request, requestID, func(c *gin.Context) *types.NewAPIError {
-		if parseErr != nil {
-			return newResponsesWSInvalidRequestError(parseErr)
+		// Redact the body source before normalization; wrapped requests use the
+		// envelope's raw request, while stream and event identities stay intact.
+		source := message
+		if len(envelope.Request) > 0 {
+			source = envelope.Request
+		}
+		redacted, err := service.ApplyPrivacyFilterToJSON(c, source)
+		if err != nil {
+			return types.NewErrorWithStatusCode(service.PrivacyFilterError(err), types.ErrorCodePrivacyFilterFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		if len(envelope.Request) > 0 {
+			envelope.Request = redacted
+		}
+		create, err := normalizeResponsesWSCreateEvent(redacted, envelope, streamID)
+		if err != nil {
+			return newResponsesWSInvalidRequestError(err)
 		}
 		c.Request.Body = io.NopCloser(bytes.NewReader(create.Body))
 		c.Request.ContentLength = int64(len(create.Body))

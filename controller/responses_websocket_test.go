@@ -27,6 +27,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -642,6 +643,83 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 	assert.Equal(t, 3000, token.UsedQuota)
 	assert.Equal(t, 97000, user.Quota)
 	assert.Equal(t, 3000, user.UsedQuota)
+}
+
+func TestResponsesWebSocketPreservesPrivacyFiltering(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		enabled     bool
+		wrapped     bool
+		passthrough bool
+		broken      bool
+		invalidMax  bool
+	}{
+		{name: "disabled preserves input"},
+		{name: "flat input is redacted", enabled: true},
+		{name: "wrapped passthrough input is redacted", enabled: true, wrapped: true, passthrough: true},
+		{name: "filter failure never reaches upstream", enabled: true, broken: true},
+		{name: "redacted wrapped input still validates token limits", enabled: true, wrapped: true, invalidMax: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			privacy := operation_setting.GetPrivacyFilterSetting()
+			previous := *privacy
+			*privacy = operation_setting.PrivacyFilterSetting{Enabled: tc.enabled}
+			if tc.broken {
+				privacy.GitleaksTOML = filepath.Join(t.TempDir(), "missing.toml")
+			}
+			t.Cleanup(func() { *privacy = previous })
+			received := make(chan string, 1)
+			fixture := newResponsesWSBillingTest(t, `tier("base", p * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+				_, data, err := ws.ReadMessage()
+				if !assert.NoError(t, err) {
+					return
+				}
+				var event struct {
+					Input    string `json:"input"`
+					StreamID string `json:"stream_id"`
+				}
+				if !assert.NoError(t, common.Unmarshal(data, &event)) {
+					return
+				}
+				assert.Equal(t, "privacy-stream", event.StreamID)
+				received <- event.Input
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp_privacy","status":"completed","output":[],"usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}}`)))
+				// Keep the connection alive until the client finishes its request.
+				_, _, _ = ws.ReadMessage()
+			})
+			if tc.passthrough {
+				channelSetting, err := common.Marshal(dto.ChannelSettings{ResponsesWebSocketEnabled: true, PassThroughBodyEnabled: true})
+				require.NoError(t, err)
+				require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", "responses-ws-upstream").Update("setting", string(channelSetting)).Error)
+			}
+			original := "alice" + "@example.com"
+			fields := fmt.Sprintf(`"model":"ws-billing","input":%q,"stream_id":"privacy-stream"`, original)
+			if tc.invalidMax {
+				fields += `,"max_output_tokens":18446744073709551615`
+			}
+			payload := `{"type":"response.create","event_id":"privacy-event",` + fields + `}`
+			if tc.wrapped {
+				payload = `{"type":"response.create","event_id":"privacy-event","response":{` + fields + `}}`
+			}
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(payload)))
+			result := readResponsesWSTestEvent(t, fixture.client)
+			if tc.broken || tc.invalidMax {
+				assert.Equal(t, "error", result["type"])
+				assert.EqualValues(t, http.StatusBadRequest, result["status"])
+				assert.Equal(t, "privacy-event", result["event_id"])
+				assert.Equal(t, "privacy-stream", result["stream_id"])
+				assert.Zero(t, fixture.connections.Load())
+				assertResponsesWSAccounting(t, fixture, nil)
+				return
+			}
+			require.Equal(t, "response.completed", result["type"])
+			want := original
+			if tc.enabled {
+				want = "[邮箱]"
+			}
+			assert.Equal(t, want, <-received)
+		})
+	}
 }
 
 // Both transports must reach the same upstream target with the same

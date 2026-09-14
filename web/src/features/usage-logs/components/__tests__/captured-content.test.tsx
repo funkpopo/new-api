@@ -16,8 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact [邮箱]
 */
-import assert from 'node:assert/strict'
-import { describe, test } from 'node:test'
+import { describe, expect, test } from 'vitest'
 
 import {
   decodeCapturedContent,
@@ -38,8 +37,7 @@ describe('captured usage-log content', () => {
       toBase64(bytes.subarray(splitIndex)),
     ]
 
-    assert.equal(
-      decodeCapturedContent(chunks, 'application/json; charset=utf-8'),
+    expect(decodeCapturedContent(chunks, 'application/json; charset=utf-8')).toBe(
       original
     )
   })
@@ -52,7 +50,7 @@ describe('captured usage-log content', () => {
       toBase64(bytes.subarray(5)),
     ]
 
-    assert.equal(decodeCapturedContent(chunks, 'audio/mpeg'), toBase64(bytes))
+    expect(decodeCapturedContent(chunks, 'audio/mpeg')).toBe(toBase64(bytes))
   })
 
   test('shows only accumulated content from an OpenAI-compatible stream', () => {
@@ -69,13 +67,12 @@ describe('captured usage-log content', () => {
       '',
     ].join('\n')
 
-    assert.deepEqual(
-      formatCapturedContent(captured, 'text/event-stream', 'response'),
-      {
-        content: '## Result\n\n**ready**',
-        renderMarkdown: true,
-      }
-    )
+        expect(
+      formatCapturedContent(captured, 'text/event-stream', 'response')
+    ).toEqual({
+      content: '## Result\n\n**ready**',
+      renderMarkdown: true,
+    })
   })
 
   test('concatenates token fragments when SSE events have no blank separator', () => {
@@ -88,13 +85,12 @@ describe('captured usage-log content', () => {
       'data: [DONE]',
     ].join('\r\n')
 
-    assert.deepEqual(
-      formatCapturedContent(captured, 'text/event-stream', 'response'),
-      {
-        content: '服务已成功启动。\n下一行',
-        renderMarkdown: true,
-      }
-    )
+    expect(
+      formatCapturedContent(captured, 'text/event-stream', 'response')
+    ).toEqual({
+      content: '服务已成功启动。\n下一行',
+      renderMarkdown: true,
+    })
   })
 
   test('shows native Responses output without duplicating the completed response', () => {
@@ -113,13 +109,12 @@ describe('captured usage-log content', () => {
       '',
     ].join('\n')
 
-    assert.deepEqual(
-      formatCapturedContent(captured, 'text/event-stream', 'response'),
-      {
-        content: 'Codex 完整结果',
-        renderMarkdown: true,
-      }
-    )
+    expect(
+      formatCapturedContent(captured, 'text/event-stream', 'response')
+    ).toEqual({
+      content: 'Codex 完整结果',
+      renderMarkdown: true,
+    })
   })
 
   test('uses a completed Responses event when no text delta was captured', () => {
@@ -132,13 +127,12 @@ describe('captured usage-log content', () => {
       '',
     ].join('\n')
 
-    assert.deepEqual(
-      formatCapturedContent(captured, 'text/event-stream', 'response'),
-      {
-        content: 'Buffered Codex result',
-        renderMarkdown: true,
-      }
-    )
+    expect(
+      formatCapturedContent(captured, 'text/event-stream', 'response')
+    ).toEqual({
+      content: 'Buffered Codex result',
+      renderMarkdown: true,
+    })
   })
 
   test('keeps Responses SSE visible when the loaded segment has no output text', () => {
@@ -151,13 +145,12 @@ describe('captured usage-log content', () => {
       '',
     ].join('\n')
 
-    assert.deepEqual(
-      formatCapturedContent(captured, 'text/event-stream', 'response'),
-      {
-        content: captured,
-        renderMarkdown: true,
-      }
-    )
+    expect(
+      formatCapturedContent(captured, 'text/event-stream', 'response')
+    ).toEqual({
+      content: captured,
+      renderMarkdown: true,
+    })
   })
 
   test('shows message content from a non-streaming chat response', () => {
@@ -174,8 +167,7 @@ describe('captured usage-log content', () => {
       usage: { total_tokens: 12 },
     })
 
-    assert.deepEqual(
-      formatCapturedContent(captured, 'application/json', 'response'),
+    expect(formatCapturedContent(captured, 'application/json', 'response')).toEqual(
       {
         content: 'Rendered response',
         renderMarkdown: true,
@@ -193,8 +185,7 @@ describe('captured usage-log content', () => {
       ],
     })
 
-    assert.deepEqual(
-      formatCapturedContent(captured, 'application/json', 'request'),
+    expect(formatCapturedContent(captured, 'application/json', 'request')).toEqual(
       {
         content: '## Instructions\n\nBe concise.\n\n**Check** the service.',
         renderMarkdown: true,
@@ -220,8 +211,7 @@ describe('captured usage-log content', () => {
       ],
     })
 
-    assert.deepEqual(
-      formatCapturedContent(captured, 'application/json', 'request'),
+    expect(formatCapturedContent(captured, 'application/json', 'request')).toEqual(
       {
         content: 'Describe this image.\nUse **Markdown**.',
         renderMarkdown: true,
@@ -233,8 +223,7 @@ describe('captured usage-log content', () => {
     const captured =
       '{"error":{"message":"upstream unavailable","type":"server_error"}}'
 
-    assert.deepEqual(
-      formatCapturedContent(captured, 'application/json', 'response'),
+    expect(formatCapturedContent(captured, 'application/json', 'response')).toEqual(
       {
         content: JSON.stringify(JSON.parse(captured), null, 2),
         renderMarkdown: false,

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -35,6 +36,11 @@ func GetSubscriptionPlans(c *gin.Context) {
 		return
 	}
 
+	group, err := model.GetUserGroup(c.GetInt("id"), true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	var plans []model.SubscriptionPlan
 	if err := model.DB.Where("enabled = ?", true).Order("sort_order desc, id desc").Find(&plans).Error; err != nil {
 		common.ApiError(c, err)
@@ -42,6 +48,9 @@ func GetSubscriptionPlans(c *gin.Context) {
 	}
 	result := make([]SubscriptionPlanDTO, 0, len(plans))
 	for _, p := range plans {
+		if !p.IsVisibleToGroup(group) {
+			continue
+		}
 		p.NormalizeDefaults()
 		result = append(result, SubscriptionPlanDTO{
 			Plan: p,
@@ -138,6 +147,24 @@ type AdminUpsertSubscriptionPlanRequest struct {
 	Plan model.SubscriptionPlan `json:"plan"`
 }
 
+func normalizeSubscriptionVisibleGroups(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", nil
+	}
+	groupRatios := ratio_setting.GetGroupRatioCopy()
+	groups := make([]string, 0)
+	for group := range strings.SplitSeq(value, ",") {
+		group = strings.TrimSpace(group)
+		if _, exists := groupRatios[group]; group == "" || !exists {
+			return "", fmt.Errorf("可见分组 %q 不存在", group)
+		}
+		if !slices.Contains(groups, group) {
+			groups = append(groups, group)
+		}
+	}
+	return strings.Join(groups, ","), nil
+}
+
 func AdminCreateSubscriptionPlan(c *gin.Context) {
 	if !requirePaymentCompliance(c) {
 		return
@@ -149,6 +176,12 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 	req.Plan.Id = 0
+	visibleGroups, err := normalizeSubscriptionVisibleGroups(req.Plan.VisibleGroups)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	req.Plan.VisibleGroups = visibleGroups
 	if strings.TrimSpace(req.Plan.Title) == "" {
 		common.ApiErrorMsg(c, "套餐标题不能为空")
 		return
@@ -204,7 +237,7 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 		common.ApiErrorMsg(c, "自定义重置周期需大于0秒")
 		return
 	}
-	err := model.DB.Create(&req.Plan).Error
+	err = model.DB.Create(&req.Plan).Error
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -241,6 +274,12 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 	req.Plan.Id = id
+	visibleGroups, err := normalizeSubscriptionVisibleGroups(req.Plan.VisibleGroups)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	req.Plan.VisibleGroups = visibleGroups
 	if req.Plan.Currency == "" {
 		req.Plan.Currency = "USD"
 	}
@@ -279,7 +318,7 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 
-	err := model.DB.Transaction(func(tx *gorm.DB) error {
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
 		// update plan (allow zero values updates with map)
 		updateMap := map[string]any{
 			"title":                      req.Plan.Title,
@@ -295,6 +334,7 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 			"creem_product_id":           req.Plan.CreemProductId,
 			"waffo_pancake_product_id":   req.Plan.WaffoPancakeProductId,
 			"max_purchase_per_user":      req.Plan.MaxPurchasePerUser,
+			"visible_groups":             req.Plan.VisibleGroups,
 			"total_amount":               req.Plan.TotalAmount,
 			"upgrade_group":              req.Plan.UpgradeGroup,
 			"downgrade_group":            req.Plan.DowngradeGroup,

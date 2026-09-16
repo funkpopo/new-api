@@ -31,13 +31,9 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 		return
 	}
 
-	plan, err := model.GetSubscriptionPlanById(req.PlanId)
+	plan, err := model.GetSubscriptionPlanForPurchase(c.GetInt("id"), req.PlanId)
 	if err != nil {
 		common.ApiError(c, err)
-		return
-	}
-	if !plan.Enabled {
-		common.ApiErrorMsg(c, "套餐未启用")
 		return
 	}
 	if plan.StripePriceId == "" {

@@ -43,7 +43,10 @@ export type Option = {
   value: string
 }
 
-interface MultiSelectProps {
+interface MultiSelectProps extends Pick<
+  React.ComponentProps<'input'>,
+  'aria-label' | 'aria-describedby' | 'aria-invalid'
+> {
   options: Option[]
   selected: string[]
   onChange: (values: string[]) => void
@@ -366,7 +369,9 @@ export function MultiSelect(props: MultiSelectProps) {
           }
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          aria-label={placeholder}
+          aria-label={props['aria-label'] ?? placeholder}
+          aria-describedby={props['aria-describedby']}
+          aria-invalid={props['aria-invalid']}
         />
       </ComboboxChips>
 

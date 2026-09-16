@@ -31,6 +31,7 @@ import {
   sideDrawerHeaderClassName,
   sideDrawerSwitchItemClassName,
 } from '@/components/drawer-layout'
+import { MultiSelect } from '@/components/multi-select'
 import { Button } from '@/components/ui/button'
 import { Combobox } from '@/components/ui/combobox'
 import {
@@ -488,6 +489,34 @@ export function SubscriptionsMutateDrawer({
                   )}
                 />
               </div>
+
+              <FormField
+                control={form.control}
+                name='visible_groups'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Visible Groups')}</FormLabel>
+                    <FormControl>
+                      <MultiSelect
+                        options={groupOptions.map((group) => ({
+                          value: group,
+                          label: group,
+                        }))}
+                        selected={field.value}
+                        onChange={field.onChange}
+                        aria-label={t('Visible Groups')}
+                        placeholder={t('All Groups')}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Only users in the selected groups can view and purchase this plan. Leave empty for all groups.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
 
               <FormField
                 control={form.control}

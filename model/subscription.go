@@ -172,6 +172,9 @@ type SubscriptionPlan struct {
 	// Max purchases per user (0 = unlimited)
 	MaxPurchasePerUser int `json:"max_purchase_per_user" gorm:"type:int;default:0"`
 
+	// User groups that can view and purchase this plan (comma-separated; empty = all).
+	VisibleGroups string `json:"visible_groups" gorm:"type:text"`
+
 	// Upgrade user group after purchase (empty = no change)
 	UpgradeGroup string `json:"upgrade_group" gorm:"type:varchar(64);default:''"`
 
@@ -208,6 +211,42 @@ func (p *SubscriptionPlan) NormalizeDefaults() {
 	if p.AllowWalletOverflow == nil {
 		p.AllowWalletOverflow = common.GetPointer(true)
 	}
+}
+
+func (p *SubscriptionPlan) IsVisibleToGroup(group string) bool {
+	if strings.TrimSpace(p.VisibleGroups) == "" {
+		return true
+	}
+	for allowed := range strings.SplitSeq(p.VisibleGroups, ",") {
+		if allowed = strings.TrimSpace(allowed); allowed != "" && allowed == group {
+			return true
+		}
+	}
+	return false
+}
+
+// GetSubscriptionPlanForPurchase reads current eligibility without the plan or user cache.
+// Existing orders and administrator assignments do not use this purchase restriction.
+func GetSubscriptionPlanForPurchase(userId, planId int) (*SubscriptionPlan, error) {
+	if userId <= 0 || planId <= 0 {
+		return nil, errors.New("invalid userId or planId")
+	}
+	var plan SubscriptionPlan
+	if err := DB.First(&plan, planId).Error; err != nil {
+		return nil, err
+	}
+	if !plan.Enabled {
+		return nil, errors.New("套餐未启用")
+	}
+	var user User
+	if err := DB.Select(commonGroupCol).First(&user, userId).Error; err != nil {
+		return nil, err
+	}
+	if !plan.IsVisibleToGroup(user.Group) {
+		return nil, errors.New("该套餐不对当前用户分组开放")
+	}
+	plan.NormalizeDefaults()
+	return &plan, nil
 }
 
 // Subscription order (payment -> webhook -> create UserSubscription)
@@ -763,8 +802,8 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 	var chargedQuota int
 	var upgradeGroup string
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		plan, err := getSubscriptionPlanByIdTx(tx, planId)
-		if err != nil {
+		var plan SubscriptionPlan
+		if err := tx.First(&plan, planId).Error; err != nil {
 			return err
 		}
 		if !plan.Enabled {
@@ -786,6 +825,9 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 		if err := lockForUpdate(tx).Where("id = ?", userId).First(&user).Error; err != nil {
 			return err
 		}
+		if !plan.IsVisibleToGroup(user.Group) {
+			return errors.New("该套餐不对当前用户分组开放")
+		}
 		if requiredQuota > 0 && user.Quota < requiredQuota {
 			return errors.New("余额不足")
 		}
@@ -796,7 +838,7 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 			}
 		}
 
-		subscription, err := CreateUserSubscriptionFromPlanTx(tx, userId, plan, PaymentMethodBalance)
+		subscription, err := CreateUserSubscriptionFromPlanTx(tx, userId, &plan, PaymentMethodBalance)
 		if err != nil {
 			return err
 		}

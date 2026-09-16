@@ -219,6 +219,13 @@ export async function getSelfSubscriptionFull(): Promise<
   return res.data
 }
 
+export async function cancelSelfSubscription(
+  subId: number
+): Promise<ApiResponse> {
+  const res = await api.post(`/api/subscription/self/${subId}/cancel`)
+  return res.data
+}
+
 export async function getPublicPlans(): Promise<ApiResponse<PlanRecord[]>> {
   const res = await api.get('/api/subscription/plans')
   return res.data

@@ -16,11 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Crown, RefreshCw, Sparkles, Check } from 'lucide-react'
+import { useMutation } from '@tanstack/react-query'
+import { Crown, RefreshCw, Sparkles, Check, CircleX } from 'lucide-react'
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   StatusBadge,
   dotColorMap,
@@ -46,6 +48,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import {
+  cancelSelfSubscription,
   getPublicPlans,
   getSelfSubscriptionFull,
   updateBillingPreference,
@@ -67,7 +70,7 @@ interface SubscriptionPlansCardProps {
   topupInfo: TopupInfo | null
   onAvailabilityChange?: (available: boolean) => void
   userQuota?: number
-  onPurchaseSuccess?: () => void | Promise<void>
+  onSubscriptionChange?: () => void | Promise<void>
 }
 
 function getEpayMethods(payMethods: PaymentMethod[] = []): PaymentMethod[] {
@@ -98,7 +101,7 @@ export function SubscriptionPlansCard({
   topupInfo,
   onAvailabilityChange,
   userQuota,
-  onPurchaseSuccess,
+  onSubscriptionChange,
 }: SubscriptionPlansCardProps) {
   const { t } = useTranslation()
 
@@ -116,6 +119,9 @@ export function SubscriptionPlansCard({
 
   const [purchaseOpen, setPurchaseOpen] = useState(false)
   const [selectedPlan, setSelectedPlan] = useState<PlanRecord | null>(null)
+  const [cancelSubscriptionId, setCancelSubscriptionId] = useState<
+    number | null
+  >(null)
 
   const enableStripe = !!topupInfo?.enable_stripe_topup
   const enableCreem = !!topupInfo?.enable_creem_topup
@@ -152,6 +158,38 @@ export function SubscriptionPlansCard({
       handleServerError(error)
     }
   }, [])
+
+  const cancelMutation = useMutation({
+    mutationFn: async (subId: number) =>
+      requireServerSuccess(await cancelSelfSubscription(subId)),
+    onSuccess: async (_, subId) => {
+      setCancelSubscriptionId(null)
+      setActiveSubscriptions((subscriptions) =>
+        subscriptions.filter((sub) => sub.subscription.id !== subId)
+      )
+      setAllSubscriptions((subscriptions) =>
+        subscriptions.map((sub) =>
+          sub.subscription.id === subId
+            ? {
+                ...sub,
+                subscription: {
+                  ...sub.subscription,
+                  status: 'cancelled',
+                  end_time: Math.floor(Date.now() / 1000),
+                },
+              }
+            : sub
+        )
+      )
+      toast.success(t('Subscription cancelled'))
+      await Promise.all([
+        fetchSelfSubscription(),
+        fetchPlans(),
+        onSubscriptionChange?.(),
+      ])
+    },
+    onError: (error) => handleServerError(error),
+  })
 
   useEffect(() => {
     const init = async () => {
@@ -409,7 +447,7 @@ export function SubscriptionPlansCard({
                   const remainDays = getRemainingDays(sub)
                   const usagePercent = getUsagePercent(sub)
                   const now = Date.now() / 1000
-                  const isExpired = (subscription?.end_time || 0) < now
+                  const isExpired = (subscription?.end_time || 0) <= now
                   const isCancelled = subscription?.status === 'cancelled'
                   const isActive =
                     subscription?.status === 'active' && !isExpired
@@ -451,9 +489,9 @@ export function SubscriptionPlansCard({
                       key={subscription?.id}
                       className='bg-background rounded-md border p-3 text-xs'
                     >
-                      <div className='flex items-center justify-between'>
-                        <div className='flex items-center gap-2'>
-                          <span className='font-medium'>
+                      <div className='flex flex-wrap items-center justify-between gap-2'>
+                        <div className='flex min-w-0 flex-wrap items-center gap-2'>
+                          <span className='min-w-0 font-medium break-all'>
                             {planTitle
                               ? `${planTitle} · ${t('Subscription')} #${subscription?.id}`
                               : `${t('Subscription')} #${subscription?.id}`}
@@ -461,11 +499,27 @@ export function SubscriptionPlansCard({
                           {statusBadge}
                         </div>
                         {isActive && (
-                          <span className='text-muted-foreground'>
-                            {t('{{count}} days remaining', {
-                              count: remainDays,
-                            })}
-                          </span>
+                          <div className='flex flex-wrap items-center gap-2'>
+                            <span className='text-muted-foreground'>
+                              {t('{{count}} days remaining', {
+                                count: remainDays,
+                              })}
+                            </span>
+                            <Button
+                              variant='outline'
+                              size='sm'
+                              disabled={cancelMutation.isPending}
+                              onClick={() =>
+                                setCancelSubscriptionId(subscription.id)
+                              }
+                            >
+                              <CircleX
+                                className='size-3.5'
+                                aria-hidden='true'
+                              />
+                              {t('Cancel subscription')}
+                            </Button>
+                          </div>
                         )}
                       </div>
                       <div className='text-muted-foreground mt-1.5'>
@@ -634,6 +688,36 @@ export function SubscriptionPlansCard({
         )}
       </TitledCard>
 
+      <ConfirmDialog
+        open={cancelSubscriptionId !== null}
+        onOpenChange={(open) => {
+          if (!open && !cancelMutation.isPending) setCancelSubscriptionId(null)
+        }}
+        title={t('Cancel subscription #{{id}}?', { id: cancelSubscriptionId })}
+        desc={
+          <div className='space-y-2'>
+            <p>
+              {t(
+                'Subscription benefits will end immediately. Unused quota will be forfeited without a refund. This cannot be undone.'
+              )}
+            </p>
+            <p>
+              {t(
+                'If you enabled automatic renewal through a payment provider, cancel it with that provider separately.'
+              )}
+            </p>
+          </div>
+        }
+        confirmText={t('Cancel subscription')}
+        destructive
+        isLoading={cancelMutation.isPending}
+        handleConfirm={() => {
+          if (cancelSubscriptionId !== null && !cancelMutation.isPending) {
+            cancelMutation.mutate(cancelSubscriptionId)
+          }
+        }}
+      />
+
       <SubscriptionPurchaseDialog
         open={purchaseOpen}
         onOpenChange={(open) => {
@@ -649,7 +733,7 @@ export function SubscriptionPlansCard({
         enableOnlineTopUp={enableOnlineTopUp}
         epayMethods={epayMethods}
         userQuota={userQuota}
-        onPurchaseSuccess={onPurchaseSuccess}
+        onPurchaseSuccess={onSubscriptionChange}
         purchaseLimit={
           selectedPlan?.plan?.max_purchase_per_user
             ? Number(selectedPlan.plan.max_purchase_per_user)

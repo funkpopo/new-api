@@ -967,6 +967,18 @@ func buildSubscriptionSummaries(subs []UserSubscription) []SubscriptionSummary {
 
 // AdminInvalidateUserSubscription marks a user subscription as cancelled and ends it immediately.
 func AdminInvalidateUserSubscription(userSubscriptionId int) (string, error) {
+	return invalidateUserSubscription(userSubscriptionId, 0)
+}
+
+// CancelUserSubscription ends an active subscription owned by the user without a refund.
+func CancelUserSubscription(userId, userSubscriptionId int) (string, error) {
+	if userId <= 0 {
+		return "", errors.New("invalid userId")
+	}
+	return invalidateUserSubscription(userSubscriptionId, userId)
+}
+
+func invalidateUserSubscription(userSubscriptionId, ownerId int) (string, error) {
 	if userSubscriptionId <= 0 {
 		return "", errors.New("invalid userSubscriptionId")
 	}
@@ -976,9 +988,15 @@ func AdminInvalidateUserSubscription(userSubscriptionId int) (string, error) {
 	var userId int
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var sub UserSubscription
-		if err := lockForUpdate(tx).
-			Where("id = ?", userSubscriptionId).First(&sub).Error; err != nil {
+		query := lockForUpdate(tx).Where("id = ?", userSubscriptionId)
+		if ownerId > 0 {
+			query = query.Where("user_id = ?", ownerId)
+		}
+		if err := query.First(&sub).Error; err != nil {
 			return err
+		}
+		if ownerId > 0 && (sub.Status != "active" || sub.EndTime <= now) {
+			return errors.New("订阅已失效或已退订")
 		}
 		userId = sub.UserId
 		if err := tx.Model(&sub).Updates(map[string]any{
@@ -1002,7 +1020,7 @@ func AdminInvalidateUserSubscription(userSubscriptionId int) (string, error) {
 		return "", err
 	}
 	if cacheGroup != "" && userId > 0 {
-		refreshSubscriptionUserGroupCache(userId, "admin subscription update")
+		refreshSubscriptionUserGroupCache(userId, "subscription cancellation")
 	}
 	if downgradeGroup != "" {
 		return fmt.Sprintf("用户分组将回退到 %s", downgradeGroup), nil

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	builtinplugins "github.com/QuantumNous/new-api/plugins"
@@ -96,6 +97,7 @@ func TestListModelsSupportsOpenAIAndGeminiAuthentication(t *testing.T) {
 
 func TestRelayPrivacyFilterCoversHostAndPluginRoutes(t *testing.T) {
 	setupRelayRouterTestDB(t)
+	require.NoError(t, i18n.Init())
 	require.NoError(t, model.DB.AutoMigrate(&model.Task{}))
 	t.Setenv("TRUSTED_PROXIES", "")
 
@@ -140,6 +142,8 @@ func TestRelayPrivacyFilterCoversHostAndPluginRoutes(t *testing.T) {
 	for _, path := range []string{
 		"/v1/chat/completions",
 		"/v1/responses",
+		"/v1/images/generations",
+		"/v1/images/edits",
 		"/v1/videos",
 		"/v1/tasks/sunoapi",
 		"/suno/submit/LYRICS",

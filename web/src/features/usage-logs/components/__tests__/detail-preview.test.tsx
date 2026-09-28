@@ -127,6 +127,67 @@ function renderPreview(other: LogOtherData, isAdmin = true) {
   return screen.getByRole('button', { name: /./ })
 }
 
+test('keeps log details open when the parent refreshes with unchanged data', async () => {
+  const other = { model_price: 0.25 }
+  const wrapper = ({ children }: { children: React.ReactNode }) => (
+    <I18nextProvider i18n={i18n}>
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    </I18nextProvider>
+  )
+  const { rerender } = render(<DetailPreview other={other} isAdmin />, {
+    wrapper,
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Per-call · $0.25' }))
+  expect(await screen.findByRole('dialog')).toBeVisible()
+  rerender(<DetailPreview other={other} isAdmin />)
+  expect(screen.getByRole('dialog')).toBeVisible()
+})
+
+test('captured log content keeps the wide dialog and response model details', async () => {
+  for (const kind of ['request', 'response']) {
+    client.setQueryData(
+      ['usage-log-content', 'req-1', kind],
+      {
+        pageParams: [1],
+        pages: [
+          {
+            success: true,
+            data: {
+              kind,
+              content_type: 'text/plain',
+              encoding: 'base64',
+              chunks: [btoa(`${kind} payload`)],
+              page: 1,
+              page_size: 100,
+              total_chunks: 1,
+              total_size: 16,
+            },
+          },
+        ],
+      },
+      { updatedAt: Date.now() + 60_000 }
+    )
+  }
+  const preview = renderPreview({
+    model_price: 0.25,
+    admin_info: { request_response_capture: true },
+    response_model: {
+      requested_model: 'requested-model',
+      upstream_model: 'upstream-model',
+      returned_model: 'returned-model',
+    },
+  })
+
+  fireEvent.click(preview)
+
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByText('request payload')).toBeVisible()
+  expect(within(dialog).getByText('response payload')).toBeVisible()
+  expect(within(dialog).getByText('returned-model')).toBeVisible()
+  expect(dialog).toHaveClass('sm:max-w-4xl', 'lg:max-w-5xl')
+  expect(dialog).toHaveClass('max-sm:max-h-(--dialog-available-height)')
+})
+
 test.each([
   {
     name: 'fixed expression zero price',

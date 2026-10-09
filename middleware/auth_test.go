@@ -295,6 +295,8 @@ func TestUserAuthAppliesAccessTokenRouteRules(t *testing.T) {
 	admin := createMiddlewarePATUser(t, "route-rule-admin", legacy)
 	require.NoError(t, model.DB.Model(admin).Update("role", common.RoleAdminUser).Error)
 	profile, _ := createMiddlewareScopedToken(t, admin.Id, 0, "profile:read")
+	walletRead, _ := createMiddlewareScopedToken(t, admin.Id, 0, "wallet:read")
+	walletWrite, _ := createMiddlewareScopedToken(t, admin.Id, 0, "wallet:write")
 	channel, _ := createMiddlewareScopedToken(t, admin.Id, time.Now().Unix()+3600, "channel:read")
 	expired, _ := createMiddlewareScopedToken(t, admin.Id, time.Now().Unix()-1, "profile:read")
 
@@ -305,11 +307,16 @@ func TestUserAuthAppliesAccessTokenRouteRules(t *testing.T) {
 	router.GET("/api/undeclared", UserAuth(), ok)
 	router.GET("/api/channel/", AdminAuth(), RequirePermission(authz.ChannelRead), ok)
 	router.GET("/api/pricing", TryUserAuth(), ok)
+	router.POST("/api/subscription/self/:id/resubscribe", UserAuth(), ok)
 
 	for _, test := range []struct {
 		name, path, token, code, reason string
+		method                          string
 		status                          int
 	}{
+		{name: "resubscribe with wallet write", method: http.MethodPost, path: "/api/subscription/self/1/resubscribe", token: walletWrite, status: http.StatusOK},
+		{name: "resubscribe with read-only wallet scope", method: http.MethodPost, path: "/api/subscription/self/1/resubscribe", token: walletRead, status: http.StatusForbidden, code: "ACCESS_TOKEN_SCOPE_DENIED", reason: "scope_denied"},
+		{name: "resubscribe with expired token", method: http.MethodPost, path: "/api/subscription/self/1/resubscribe", token: expired, status: http.StatusUnauthorized, code: "ACCESS_TOKEN_EXPIRED", reason: "expired"},
 		{name: "granted scope on a never expiring token", path: "/api/user/self", token: profile, status: http.StatusOK},
 		{name: "missing scope", path: "/api/user/self", token: channel, status: http.StatusForbidden, code: "ACCESS_TOKEN_SCOPE_DENIED", reason: "scope_denied"},
 		{name: "undeclared route", path: "/api/undeclared", token: profile, status: http.StatusForbidden, code: "ACCESS_TOKEN_ROUTE_UNDECLARED", reason: "route_undeclared"},
@@ -321,7 +328,14 @@ func TestUserAuthAppliesAccessTokenRouteRules(t *testing.T) {
 		{name: "legacy token on a session route", path: "/api/user/access_tokens", token: legacy, status: http.StatusForbidden, code: "AUTH_SESSION_REQUIRED", reason: "session_required"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			response := middlewareBearerRequest(router, test.path, test.token)
+			method := test.method
+			if method == "" {
+				method = http.MethodGet
+			}
+			request := httptest.NewRequest(method, test.path, nil)
+			request.Header.Set("Authorization", "Bearer "+test.token)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
 			assert.Equal(t, test.status, response.Code, response.Body.String())
 			if test.code != "" {
 				assert.Contains(t, response.Body.String(), `"code":"`+test.code+`"`)

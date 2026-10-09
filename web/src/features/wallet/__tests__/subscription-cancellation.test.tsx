@@ -103,6 +103,75 @@ beforeEach(() => {
 })
 
 describe('wallet subscription cancellation', () => {
+  it('offers resubscription only for cancelled subscriptions that have not expired', async () => {
+    subscriptions[1].subscription.end_time =
+      subscriptions[0].subscription.end_time
+    const post = vi.spyOn(api, 'post')
+    const user = userEvent.setup()
+    renderSubscriptions()
+
+    const resubscribe = await screen.findByRole('button', {
+      name: 'Resubscribe',
+    })
+    expect(screen.getAllByRole('button', { name: 'Resubscribe' })).toHaveLength(
+      1
+    )
+    resubscribe.focus()
+    await user.keyboard('{Enter}')
+    const dialog = await screen.findByRole('alertdialog', {
+      name: 'Resubscribe to subscription #2?',
+    })
+    expect(dialog).toHaveTextContent('original expiration date')
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    )
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('restores a cancelled subscription and refreshes account data without duplicate requests', async () => {
+    subscriptions[1].subscription.end_time =
+      subscriptions[0].subscription.end_time
+    subscriptions[0].subscription.status = 'expired'
+    let completeRequest!: (response: { data: { success: boolean } }) => void
+    const pending = new Promise<{ data: { success: boolean } }>((resolve) => {
+      completeRequest = resolve
+    })
+    const post = vi.spyOn(api, 'post').mockReturnValue(pending)
+    const onChange = vi.fn()
+    const user = userEvent.setup()
+    renderSubscriptions(onChange)
+
+    await user.click(await screen.findByRole('button', { name: 'Resubscribe' }))
+    const dialog = await screen.findByRole('alertdialog')
+    const confirm = within(dialog).getByRole('button', { name: 'Resubscribe' })
+    await user.click(confirm)
+    await waitFor(() => expect(confirm).toBeDisabled())
+    expect(
+      within(dialog).getByRole('button', { name: 'Cancel' })
+    ).toBeDisabled()
+    await user.click(confirm)
+    expect(post).toHaveBeenCalledOnce()
+    expect(post).toHaveBeenCalledWith('/api/subscription/self/2/resubscribe')
+
+    subscriptions[1].subscription.status = 'active'
+    await act(async () => completeRequest({ data: { success: true } }))
+    await waitFor(() =>
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    )
+    expect(
+      screen.queryByRole('button', { name: 'Resubscribe' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Cancel subscription' })
+    ).toBeEnabled()
+    expect(screen.getByText('Active')).toBeVisible()
+    expect(
+      screen.queryByText(/Requests will be rejected/)
+    ).not.toBeInTheDocument()
+    expect(onChange).toHaveBeenCalledOnce()
+  })
+
   it('offers cancellation only for active subscriptions and closing confirmation sends no request', async () => {
     const post = vi.spyOn(api, 'post')
     const user = userEvent.setup()
@@ -114,6 +183,9 @@ describe('wallet subscription cancellation', () => {
     expect(
       screen.getAllByRole('button', { name: 'Cancel subscription' })
     ).toHaveLength(1)
+    expect(
+      screen.queryByRole('button', { name: 'Resubscribe' })
+    ).not.toBeInTheDocument()
     cancel.focus()
     await user.keyboard('{Enter}')
 
@@ -165,6 +237,7 @@ describe('wallet subscription cancellation', () => {
     ).not.toBeInTheDocument()
     expect(screen.getByText('Subscription #1')).toBeVisible()
     expect(screen.getAllByText('Cancelled')).toHaveLength(2)
+    expect(screen.getByRole('button', { name: 'Resubscribe' })).toBeVisible()
     expect(screen.getByText(/Requests will be rejected/)).toBeVisible()
     expect(onChange).toHaveBeenCalledOnce()
   })
@@ -200,6 +273,42 @@ describe('wallet subscription cancellation', () => {
       expect(confirm).toBeEnabled()
       expect(onChange).not.toHaveBeenCalled()
       expect(screen.getByText('Active')).toBeVisible()
+    }
+  )
+
+  it.each([
+    [
+      'business failure',
+      { data: { success: false, message: 'Subscription has expired' } },
+    ],
+    ['network failure', new Error('Connection unavailable')],
+  ])(
+    'keeps resubscription available for retry after %s',
+    async (_, failure) => {
+      subscriptions[1].subscription.end_time =
+        subscriptions[0].subscription.end_time
+      const post = vi.spyOn(api, 'post')
+      if (failure instanceof Error) post.mockRejectedValue(failure)
+      else post.mockResolvedValue(failure)
+      const errorToast = vi.spyOn(toast, 'error')
+      const onChange = vi.fn()
+      const user = userEvent.setup()
+      renderSubscriptions(onChange)
+
+      await user.click(
+        await screen.findByRole('button', { name: 'Resubscribe' })
+      )
+      const dialog = await screen.findByRole('alertdialog')
+      const confirm = within(dialog).getByRole('button', {
+        name: 'Resubscribe',
+      })
+      await user.click(confirm)
+
+      await waitFor(() => expect(errorToast).toHaveBeenCalledOnce())
+      expect(dialog).toBeVisible()
+      expect(confirm).toBeEnabled()
+      expect(screen.getByText('Cancelled')).toBeVisible()
+      expect(onChange).not.toHaveBeenCalled()
     }
   )
 })

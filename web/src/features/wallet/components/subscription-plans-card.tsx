@@ -51,6 +51,7 @@ import {
   cancelSelfSubscription,
   getPublicPlans,
   getSelfSubscriptionFull,
+  resubscribeSelfSubscription,
   updateBillingPreference,
 } from '@/features/subscriptions/api'
 import { SubscriptionPurchaseDialog } from '@/features/subscriptions/components/dialogs/subscription-purchase-dialog'
@@ -122,6 +123,7 @@ export function SubscriptionPlansCard({
   const [cancelSubscriptionId, setCancelSubscriptionId] = useState<
     number | null
   >(null)
+  const [resubscribeId, setResubscribeId] = useState<number | null>(null)
 
   const enableStripe = !!topupInfo?.enable_stripe_topup
   const enableCreem = !!topupInfo?.enable_creem_topup
@@ -175,7 +177,6 @@ export function SubscriptionPlansCard({
                 subscription: {
                   ...sub.subscription,
                   status: 'cancelled',
-                  end_time: Math.floor(Date.now() / 1000),
                 },
               }
             : sub
@@ -190,6 +191,23 @@ export function SubscriptionPlansCard({
     },
     onError: (error) => handleServerError(error),
   })
+
+  const resubscribeMutation = useMutation({
+    mutationFn: async (subId: number) =>
+      requireServerSuccess(await resubscribeSelfSubscription(subId)),
+    onSuccess: async () => {
+      setResubscribeId(null)
+      toast.success(t('Subscription restored'))
+      await Promise.all([
+        fetchSelfSubscription(),
+        fetchPlans(),
+        onSubscriptionChange?.(),
+      ])
+    },
+    onError: (error) => handleServerError(error),
+  })
+  const changingSubscription =
+    cancelMutation.isPending || resubscribeMutation.isPending
 
   useEffect(() => {
     const init = async () => {
@@ -449,6 +467,7 @@ export function SubscriptionPlansCard({
                   const now = Date.now() / 1000
                   const isExpired = (subscription?.end_time || 0) <= now
                   const isCancelled = subscription?.status === 'cancelled'
+                  const canResubscribe = isCancelled && !isExpired
                   const isActive =
                     subscription?.status === 'active' && !isExpired
                   const nextResetTime = subscription?.next_reset_time ?? 0
@@ -478,10 +497,8 @@ export function SubscriptionPlansCard({
                   }
 
                   let endTimeLabel = t('Expired at')
-                  if (isActive) {
+                  if (isActive || isCancelled) {
                     endTimeLabel = t('Until')
-                  } else if (isCancelled) {
-                    endTimeLabel = t('Cancelled at')
                   }
 
                   return (
@@ -508,7 +525,7 @@ export function SubscriptionPlansCard({
                             <Button
                               variant='outline'
                               size='sm'
-                              disabled={cancelMutation.isPending}
+                              disabled={changingSubscription}
                               onClick={() =>
                                 setCancelSubscriptionId(subscription.id)
                               }
@@ -520,6 +537,20 @@ export function SubscriptionPlansCard({
                               {t('Cancel subscription')}
                             </Button>
                           </div>
+                        )}
+                        {canResubscribe && (
+                          <Button
+                            variant='outline'
+                            size='sm'
+                            disabled={changingSubscription}
+                            onClick={() => setResubscribeId(subscription.id)}
+                          >
+                            <RefreshCw
+                              className='size-3.5'
+                              aria-hidden='true'
+                            />
+                            {t('Resubscribe')}
+                          </Button>
                         )}
                       </div>
                       <div className='text-muted-foreground mt-1.5'>
@@ -698,7 +729,7 @@ export function SubscriptionPlansCard({
           <div className='space-y-2'>
             <p>
               {t(
-                'Subscription benefits will end immediately. Unused quota will be forfeited without a refund. This cannot be undone.'
+                'Subscription benefits will stop immediately without a refund. You can resubscribe before the original expiration date to use the remaining quota.'
               )}
             </p>
             <p>
@@ -714,6 +745,24 @@ export function SubscriptionPlansCard({
         handleConfirm={() => {
           if (cancelSubscriptionId !== null && !cancelMutation.isPending) {
             cancelMutation.mutate(cancelSubscriptionId)
+          }
+        }}
+      />
+
+      <ConfirmDialog
+        open={resubscribeId !== null}
+        onOpenChange={(open) => {
+          if (!open && !resubscribeMutation.isPending) setResubscribeId(null)
+        }}
+        title={t('Resubscribe to subscription #{{id}}?', { id: resubscribeId })}
+        desc={t(
+          'Your remaining subscription benefits will be restored without an additional charge. The original expiration date and quota usage will stay the same.'
+        )}
+        confirmText={t('Resubscribe')}
+        isLoading={resubscribeMutation.isPending}
+        handleConfirm={() => {
+          if (resubscribeId !== null && !resubscribeMutation.isPending) {
+            resubscribeMutation.mutate(resubscribeId)
           }
         }}
       />

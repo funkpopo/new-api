@@ -98,6 +98,21 @@ func CancelSelfSubscription(c *gin.Context) {
 	common.ApiSuccess(c, nil)
 }
 
+func ResubscribeSelfSubscription(c *gin.Context) {
+	subId, err := strconv.Atoi(c.Param("id"))
+	if err != nil || subId <= 0 {
+		common.ApiErrorMsg(c, "无效的订阅ID")
+		return
+	}
+	userId := c.GetInt("id")
+	if err := model.ResubscribeUserSubscription(userId, subId); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.RecordLog(userId, model.LogTypeSystem, fmt.Sprintf("用户重新订阅，订阅ID: %d", subId))
+	common.ApiSuccess(c, nil)
+}
+
 func UpdateSubscriptionPreference(c *gin.Context) {
 	userId := c.GetInt("id")
 	var req BillingPreferenceRequest

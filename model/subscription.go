@@ -970,12 +970,54 @@ func AdminInvalidateUserSubscription(userSubscriptionId int) (string, error) {
 	return invalidateUserSubscription(userSubscriptionId, 0)
 }
 
-// CancelUserSubscription ends an active subscription owned by the user without a refund.
+// CancelUserSubscription disables an active subscription without a refund,
+// preserving its expiration and quota so the owner can resubscribe before expiry.
 func CancelUserSubscription(userId, userSubscriptionId int) (string, error) {
 	if userId <= 0 {
 		return "", errors.New("invalid userId")
 	}
 	return invalidateUserSubscription(userSubscriptionId, userId)
+}
+
+// ResubscribeUserSubscription restores a cancelled subscription's remaining benefits.
+// Admin-invalidated and legacy cancellations have already ended and cannot be restored.
+func ResubscribeUserSubscription(userId, userSubscriptionId int) error {
+	if userId <= 0 || userSubscriptionId <= 0 {
+		return errors.New("invalid userId or userSubscriptionId")
+	}
+	groupChanged := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var sub UserSubscription
+		if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", userSubscriptionId, userId).First(&sub).Error; err != nil {
+			return err
+		}
+		now := common.GetTimestamp()
+		if sub.Status != "cancelled" || sub.EndTime <= now {
+			return errors.New("订阅未退订或已到期，无法重新订阅")
+		}
+		updates := map[string]any{"status": "active", "updated_at": now}
+		if upgradeGroup := strings.TrimSpace(sub.UpgradeGroup); upgradeGroup != "" {
+			currentGroup, err := getUserGroupByIdTx(tx, userId)
+			if err != nil {
+				return err
+			}
+			if currentGroup != upgradeGroup {
+				updates["prev_user_group"] = currentGroup
+				if err := tx.Model(&User{}).Where("id = ?", userId).Update("group", upgradeGroup).Error; err != nil {
+					return err
+				}
+				groupChanged = true
+			}
+		}
+		return tx.Model(&sub).Updates(updates).Error
+	})
+	if err != nil {
+		return err
+	}
+	if groupChanged {
+		refreshSubscriptionUserGroupCache(userId, "subscription resubscription")
+	}
+	return nil
 }
 
 func invalidateUserSubscription(userSubscriptionId, ownerId int) (string, error) {
@@ -999,11 +1041,15 @@ func invalidateUserSubscription(userSubscriptionId, ownerId int) (string, error)
 			return errors.New("订阅已失效或已退订")
 		}
 		userId = sub.UserId
-		if err := tx.Model(&sub).Updates(map[string]any{
+		updates := map[string]any{
 			"status":     "cancelled",
-			"end_time":   now,
 			"updated_at": now,
-		}).Error; err != nil {
+		}
+		// Administrative invalidation remains irreversible for the user.
+		if ownerId == 0 {
+			updates["end_time"] = now
+		}
+		if err := tx.Model(&sub).Updates(updates).Error; err != nil {
 			return err
 		}
 		target, err := downgradeUserGroupForSubscriptionTx(tx, &sub, now)

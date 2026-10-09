@@ -172,6 +172,9 @@ type SubscriptionPlan struct {
 	// Max purchases per user (0 = unlimited)
 	MaxPurchasePerUser int `json:"max_purchase_per_user" gorm:"type:int;default:0"`
 
+	// User groups that can view and purchase this plan (comma-separated; empty = all).
+	VisibleGroups string `json:"visible_groups" gorm:"type:text"`
+
 	// Upgrade user group after purchase (empty = no change)
 	UpgradeGroup string `json:"upgrade_group" gorm:"type:varchar(64);default:''"`
 
@@ -208,6 +211,42 @@ func (p *SubscriptionPlan) NormalizeDefaults() {
 	if p.AllowWalletOverflow == nil {
 		p.AllowWalletOverflow = common.GetPointer(true)
 	}
+}
+
+func (p *SubscriptionPlan) IsVisibleToGroup(group string) bool {
+	if strings.TrimSpace(p.VisibleGroups) == "" {
+		return true
+	}
+	for allowed := range strings.SplitSeq(p.VisibleGroups, ",") {
+		if allowed = strings.TrimSpace(allowed); allowed != "" && allowed == group {
+			return true
+		}
+	}
+	return false
+}
+
+// GetSubscriptionPlanForPurchase reads current eligibility without the plan or user cache.
+// Existing orders and administrator assignments do not use this purchase restriction.
+func GetSubscriptionPlanForPurchase(userId, planId int) (*SubscriptionPlan, error) {
+	if userId <= 0 || planId <= 0 {
+		return nil, errors.New("invalid userId or planId")
+	}
+	var plan SubscriptionPlan
+	if err := DB.First(&plan, planId).Error; err != nil {
+		return nil, err
+	}
+	if !plan.Enabled {
+		return nil, common.NewMessage("Subscription plan is not enabled")
+	}
+	var user User
+	if err := DB.Select(commonGroupCol).First(&user, userId).Error; err != nil {
+		return nil, err
+	}
+	if !plan.IsVisibleToGroup(user.Group) {
+		return nil, common.NewMessage("This plan is not available for your user group")
+	}
+	plan.NormalizeDefaults()
+	return &plan, nil
 }
 
 // Subscription order (payment -> webhook -> create UserSubscription)
@@ -766,8 +805,8 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 	var chargedQuota int
 	var upgradeGroup string
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		plan, err := getSubscriptionPlanByIdTx(tx, planId)
-		if err != nil {
+		var plan SubscriptionPlan
+		if err := tx.First(&plan, planId).Error; err != nil {
 			return err
 		}
 		if !plan.Enabled {
@@ -789,6 +828,9 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 		if err := lockForUpdate(tx).Where("id = ?", userId).First(&user).Error; err != nil {
 			return err
 		}
+		if !plan.IsVisibleToGroup(user.Group) {
+			return common.NewMessage("This plan is not available for your user group")
+		}
 		if requiredQuota > 0 && user.Quota < requiredQuota {
 			return common.NewMessage("Insufficient balance")
 		}
@@ -799,7 +841,7 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 			}
 		}
 
-		subscription, err := CreateUserSubscriptionFromPlanTx(tx, userId, plan, PaymentMethodBalance)
+		subscription, err := CreateUserSubscriptionFromPlanTx(tx, userId, &plan, PaymentMethodBalance)
 		if err != nil {
 			return err
 		}
@@ -931,6 +973,60 @@ func buildSubscriptionSummaries(subs []UserSubscription) []SubscriptionSummary {
 
 // AdminInvalidateUserSubscription marks a user subscription as cancelled and ends it immediately.
 func AdminInvalidateUserSubscription(userSubscriptionId int) (*common.Message, error) {
+	return invalidateUserSubscription(userSubscriptionId, 0)
+}
+
+// CancelUserSubscription disables an active subscription without a refund,
+// preserving its expiration and quota so the owner can resubscribe before expiry.
+func CancelUserSubscription(userId, userSubscriptionId int) (*common.Message, error) {
+	if userId <= 0 {
+		return nil, errors.New("invalid userId")
+	}
+	return invalidateUserSubscription(userSubscriptionId, userId)
+}
+
+// ResubscribeUserSubscription restores a cancelled subscription's remaining benefits.
+// Admin-invalidated and legacy cancellations have already ended and cannot be restored.
+func ResubscribeUserSubscription(userId, userSubscriptionId int) error {
+	if userId <= 0 || userSubscriptionId <= 0 {
+		return errors.New("invalid userId or userSubscriptionId")
+	}
+	groupChanged := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var sub UserSubscription
+		if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", userSubscriptionId, userId).First(&sub).Error; err != nil {
+			return err
+		}
+		now := common.GetTimestamp()
+		if sub.Status != "cancelled" || sub.EndTime <= now {
+			return common.NewMessage("The subscription is not cancelled or has expired and cannot be restored")
+		}
+		updates := map[string]any{"status": "active", "updated_at": now}
+		if upgradeGroup := strings.TrimSpace(sub.UpgradeGroup); upgradeGroup != "" {
+			currentGroup, err := getUserGroupByIdTx(tx, userId)
+			if err != nil {
+				return err
+			}
+			if currentGroup != upgradeGroup {
+				updates["prev_user_group"] = currentGroup
+				if err := tx.Model(&User{}).Where("id = ?", userId).Update("group", upgradeGroup).Error; err != nil {
+					return err
+				}
+				groupChanged = true
+			}
+		}
+		return tx.Model(&sub).Updates(updates).Error
+	})
+	if err != nil {
+		return err
+	}
+	if groupChanged {
+		refreshSubscriptionUserGroupCache(userId, common.LogText("subscription resubscription"))
+	}
+	return nil
+}
+
+func invalidateUserSubscription(userSubscriptionId, ownerId int) (*common.Message, error) {
 	if userSubscriptionId <= 0 {
 		return nil, errors.New("invalid userSubscriptionId")
 	}
@@ -940,16 +1036,26 @@ func AdminInvalidateUserSubscription(userSubscriptionId int) (*common.Message, e
 	var userId int
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var sub UserSubscription
-		if err := lockForUpdate(tx).
-			Where("id = ?", userSubscriptionId).First(&sub).Error; err != nil {
+		query := lockForUpdate(tx).Where("id = ?", userSubscriptionId)
+		if ownerId > 0 {
+			query = query.Where("user_id = ?", ownerId)
+		}
+		if err := query.First(&sub).Error; err != nil {
 			return err
 		}
+		if ownerId > 0 && (sub.Status != "active" || sub.EndTime <= now) {
+			return common.NewMessage("The subscription has expired or is already cancelled")
+		}
 		userId = sub.UserId
-		if err := tx.Model(&sub).Updates(map[string]any{
+		updates := map[string]any{
 			"status":     "cancelled",
-			"end_time":   now,
 			"updated_at": now,
-		}).Error; err != nil {
+		}
+		// Administrative invalidation remains irreversible for the user.
+		if ownerId == 0 {
+			updates["end_time"] = now
+		}
+		if err := tx.Model(&sub).Updates(updates).Error; err != nil {
 			return err
 		}
 		target, err := downgradeUserGroupForSubscriptionTx(tx, &sub, now)
@@ -966,7 +1072,7 @@ func AdminInvalidateUserSubscription(userSubscriptionId int) (*common.Message, e
 		return nil, err
 	}
 	if cacheGroup != "" && userId > 0 {
-		refreshSubscriptionUserGroupCache(userId, common.LogText("admin subscription update"))
+		refreshSubscriptionUserGroupCache(userId, common.LogText("subscription cancellation"))
 	}
 	if downgradeGroup != "" {
 		return common.NewMessage("User group will be reverted to {{group}}", map[string]any{"group": downgradeGroup}), nil

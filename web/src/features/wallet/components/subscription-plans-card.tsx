@@ -16,11 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Crown, RefreshCw, Sparkles, Check } from 'lucide-react'
+import { useMutation } from '@tanstack/react-query'
+import { Crown, RefreshCw, Sparkles, Check, CircleX } from 'lucide-react'
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   StatusBadge,
   dotColorMap,
@@ -46,8 +48,10 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import {
+  cancelSelfSubscription,
   getPublicPlans,
   getSelfSubscriptionFull,
+  resubscribeSelfSubscription,
   updateBillingPreference,
 } from '@/features/subscriptions/api'
 import { SubscriptionPurchaseDialog } from '@/features/subscriptions/components/dialogs/subscription-purchase-dialog'
@@ -67,7 +71,7 @@ interface SubscriptionPlansCardProps {
   topupInfo: TopupInfo | null
   onAvailabilityChange?: (available: boolean) => void
   userQuota?: number
-  onPurchaseSuccess?: () => void | Promise<void>
+  onSubscriptionChange?: () => void | Promise<void>
 }
 
 function getEpayMethods(payMethods: PaymentMethod[] = []): PaymentMethod[] {
@@ -98,7 +102,7 @@ export function SubscriptionPlansCard({
   topupInfo,
   onAvailabilityChange,
   userQuota,
-  onPurchaseSuccess,
+  onSubscriptionChange,
 }: SubscriptionPlansCardProps) {
   const { t } = useTranslation()
 
@@ -116,6 +120,10 @@ export function SubscriptionPlansCard({
 
   const [purchaseOpen, setPurchaseOpen] = useState(false)
   const [selectedPlan, setSelectedPlan] = useState<PlanRecord | null>(null)
+  const [cancelSubscriptionId, setCancelSubscriptionId] = useState<
+    number | null
+  >(null)
+  const [resubscribeId, setResubscribeId] = useState<number | null>(null)
 
   const enableStripe = !!topupInfo?.enable_stripe_topup
   const enableCreem = !!topupInfo?.enable_creem_topup
@@ -152,6 +160,54 @@ export function SubscriptionPlansCard({
       handleServerError(error)
     }
   }, [])
+
+  const cancelMutation = useMutation({
+    mutationFn: async (subId: number) =>
+      requireServerSuccess(await cancelSelfSubscription(subId)),
+    onSuccess: async (_, subId) => {
+      setCancelSubscriptionId(null)
+      setActiveSubscriptions((subscriptions) =>
+        subscriptions.filter((sub) => sub.subscription.id !== subId)
+      )
+      setAllSubscriptions((subscriptions) =>
+        subscriptions.map((sub) =>
+          sub.subscription.id === subId
+            ? {
+                ...sub,
+                subscription: {
+                  ...sub.subscription,
+                  status: 'cancelled',
+                },
+              }
+            : sub
+        )
+      )
+      toast.success(t('Subscription cancelled'))
+      await Promise.all([
+        fetchSelfSubscription(),
+        fetchPlans(),
+        onSubscriptionChange?.(),
+      ])
+    },
+    onError: (error) => handleServerError(error),
+  })
+
+  const resubscribeMutation = useMutation({
+    mutationFn: async (subId: number) =>
+      requireServerSuccess(await resubscribeSelfSubscription(subId)),
+    onSuccess: async () => {
+      setResubscribeId(null)
+      toast.success(t('Subscription restored'))
+      await Promise.all([
+        fetchSelfSubscription(),
+        fetchPlans(),
+        onSubscriptionChange?.(),
+      ])
+    },
+    onError: (error) => handleServerError(error),
+  })
+  const changingSubscription =
+    cancelMutation.isPending || resubscribeMutation.isPending
 
   useEffect(() => {
     const init = async () => {
@@ -409,8 +465,9 @@ export function SubscriptionPlansCard({
                   const remainDays = getRemainingDays(sub)
                   const usagePercent = getUsagePercent(sub)
                   const now = Date.now() / 1000
-                  const isExpired = (subscription?.end_time || 0) < now
+                  const isExpired = (subscription?.end_time || 0) <= now
                   const isCancelled = subscription?.status === 'cancelled'
+                  const canResubscribe = isCancelled && !isExpired
                   const isActive =
                     subscription?.status === 'active' && !isExpired
                   const nextResetTime = subscription?.next_reset_time ?? 0
@@ -440,10 +497,8 @@ export function SubscriptionPlansCard({
                   }
 
                   let endTimeLabel = t('Expired at')
-                  if (isActive) {
+                  if (isActive || isCancelled) {
                     endTimeLabel = t('Until')
-                  } else if (isCancelled) {
-                    endTimeLabel = t('Cancelled at')
                   }
 
                   return (
@@ -451,9 +506,9 @@ export function SubscriptionPlansCard({
                       key={subscription?.id}
                       className='bg-background rounded-md border p-3 text-xs'
                     >
-                      <div className='flex items-center justify-between'>
-                        <div className='flex items-center gap-2'>
-                          <span className='font-medium'>
+                      <div className='flex flex-wrap items-center justify-between gap-2'>
+                        <div className='flex min-w-0 flex-wrap items-center gap-2'>
+                          <span className='min-w-0 font-medium break-all'>
                             {planTitle
                               ? `${planTitle} · ${t('Subscription')} #${subscription?.id}`
                               : `${t('Subscription')} #${subscription?.id}`}
@@ -461,11 +516,41 @@ export function SubscriptionPlansCard({
                           {statusBadge}
                         </div>
                         {isActive && (
-                          <span className='text-muted-foreground'>
-                            {t('{{count}} days remaining', {
-                              count: remainDays,
-                            })}
-                          </span>
+                          <div className='flex flex-wrap items-center gap-2'>
+                            <span className='text-muted-foreground'>
+                              {t('{{count}} days remaining', {
+                                count: remainDays,
+                              })}
+                            </span>
+                            <Button
+                              variant='outline'
+                              size='sm'
+                              disabled={changingSubscription}
+                              onClick={() =>
+                                setCancelSubscriptionId(subscription.id)
+                              }
+                            >
+                              <CircleX
+                                className='size-3.5'
+                                aria-hidden='true'
+                              />
+                              {t('Cancel subscription')}
+                            </Button>
+                          </div>
+                        )}
+                        {canResubscribe && (
+                          <Button
+                            variant='outline'
+                            size='sm'
+                            disabled={changingSubscription}
+                            onClick={() => setResubscribeId(subscription.id)}
+                          >
+                            <RefreshCw
+                              className='size-3.5'
+                              aria-hidden='true'
+                            />
+                            {t('Resubscribe')}
+                          </Button>
                         )}
                       </div>
                       <div className='text-muted-foreground mt-1.5'>
@@ -634,6 +719,54 @@ export function SubscriptionPlansCard({
         )}
       </TitledCard>
 
+      <ConfirmDialog
+        open={cancelSubscriptionId !== null}
+        onOpenChange={(open) => {
+          if (!open && !cancelMutation.isPending) setCancelSubscriptionId(null)
+        }}
+        title={t('Cancel subscription #{{id}}?', { id: cancelSubscriptionId })}
+        desc={
+          <div className='space-y-2'>
+            <p>
+              {t(
+                'Subscription benefits will stop immediately without a refund. You can resubscribe before the original expiration date to use the remaining quota.'
+              )}
+            </p>
+            <p>
+              {t(
+                'If you enabled automatic renewal through a payment provider, cancel it with that provider separately.'
+              )}
+            </p>
+          </div>
+        }
+        confirmText={t('Cancel subscription')}
+        destructive
+        isLoading={cancelMutation.isPending}
+        handleConfirm={() => {
+          if (cancelSubscriptionId !== null && !cancelMutation.isPending) {
+            cancelMutation.mutate(cancelSubscriptionId)
+          }
+        }}
+      />
+
+      <ConfirmDialog
+        open={resubscribeId !== null}
+        onOpenChange={(open) => {
+          if (!open && !resubscribeMutation.isPending) setResubscribeId(null)
+        }}
+        title={t('Resubscribe to subscription #{{id}}?', { id: resubscribeId })}
+        desc={t(
+          'Your remaining subscription benefits will be restored without an additional charge. The original expiration date and quota usage will stay the same.'
+        )}
+        confirmText={t('Resubscribe')}
+        isLoading={resubscribeMutation.isPending}
+        handleConfirm={() => {
+          if (resubscribeId !== null && !resubscribeMutation.isPending) {
+            resubscribeMutation.mutate(resubscribeId)
+          }
+        }}
+      />
+
       <SubscriptionPurchaseDialog
         open={purchaseOpen}
         onOpenChange={(open) => {
@@ -649,7 +782,7 @@ export function SubscriptionPlansCard({
         enableOnlineTopUp={enableOnlineTopUp}
         epayMethods={epayMethods}
         userQuota={userQuota}
-        onPurchaseSuccess={onPurchaseSuccess}
+        onPurchaseSuccess={onSubscriptionChange}
         purchaseLimit={
           selectedPlan?.plan?.max_purchase_per_user
             ? Number(selectedPlan.plan.max_purchase_per_user)

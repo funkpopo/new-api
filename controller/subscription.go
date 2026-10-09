@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 
@@ -34,6 +35,11 @@ func GetSubscriptionPlans(c *gin.Context) {
 		return
 	}
 
+	group, err := model.GetUserGroup(c.GetInt("id"), true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	var plans []model.SubscriptionPlan
 	if err := model.DB.Where("enabled = ?", true).Order("sort_order desc, id desc").Find(&plans).Error; err != nil {
 		common.ApiError(c, err)
@@ -41,6 +47,9 @@ func GetSubscriptionPlans(c *gin.Context) {
 	}
 	result := make([]SubscriptionPlanDTO, 0, len(plans))
 	for _, p := range plans {
+		if !p.IsVisibleToGroup(group) {
+			continue
+		}
 		p.NormalizeDefaults()
 		result = append(result, SubscriptionPlanDTO{
 			Plan: p,
@@ -71,6 +80,36 @@ func GetSubscriptionSelf(c *gin.Context) {
 		"subscriptions":      activeSubscriptions, // all active subscriptions
 		"all_subscriptions":  allSubscriptions,    // all subscriptions including expired
 	})
+}
+
+func CancelSelfSubscription(c *gin.Context) {
+	subId, err := strconv.Atoi(c.Param("id"))
+	if err != nil || subId <= 0 {
+		common.ApiErrorT(c, "Invalid subscription ID")
+		return
+	}
+	userId := c.GetInt("id")
+	if _, err := model.CancelUserSubscription(userId, subId); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.RecordLog(userId, model.LogTypeSystem, common.NewMessage("User cancelled subscription {{id}}", map[string]any{"id": subId}))
+	common.ApiSuccess(c, nil)
+}
+
+func ResubscribeSelfSubscription(c *gin.Context) {
+	subId, err := strconv.Atoi(c.Param("id"))
+	if err != nil || subId <= 0 {
+		common.ApiErrorT(c, "Invalid subscription ID")
+		return
+	}
+	userId := c.GetInt("id")
+	if err := model.ResubscribeUserSubscription(userId, subId); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.RecordLog(userId, model.LogTypeSystem, common.NewMessage("User restored subscription {{id}}", map[string]any{"id": subId}))
+	common.ApiSuccess(c, nil)
 }
 
 func UpdateSubscriptionPreference(c *gin.Context) {
@@ -137,6 +176,24 @@ type AdminUpsertSubscriptionPlanRequest struct {
 	Plan model.SubscriptionPlan `json:"plan"`
 }
 
+func normalizeSubscriptionVisibleGroups(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", nil
+	}
+	groupRatios := ratio_setting.GetGroupRatioCopy()
+	groups := make([]string, 0)
+	for group := range strings.SplitSeq(value, ",") {
+		group = strings.TrimSpace(group)
+		if _, exists := groupRatios[group]; group == "" || !exists {
+			return "", common.NewMessage("Visible group {{group}} does not exist", map[string]any{"group": group})
+		}
+		if !slices.Contains(groups, group) {
+			groups = append(groups, group)
+		}
+	}
+	return strings.Join(groups, ","), nil
+}
+
 func AdminCreateSubscriptionPlan(c *gin.Context) {
 	if !requirePaymentCompliance(c) {
 		return
@@ -148,6 +205,12 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 	req.Plan.Id = 0
+	visibleGroups, err := normalizeSubscriptionVisibleGroups(req.Plan.VisibleGroups)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	req.Plan.VisibleGroups = visibleGroups
 	if strings.TrimSpace(req.Plan.Title) == "" {
 		common.ApiErrorT(c, "Subscription plan title cannot be empty")
 		return
@@ -203,7 +266,7 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 		common.ApiErrorT(c, "Custom reset cycle must be greater than 0 seconds")
 		return
 	}
-	err := model.DB.Create(&req.Plan).Error
+	err = model.DB.Create(&req.Plan).Error
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -240,6 +303,12 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 	req.Plan.Id = id
+	visibleGroups, err := normalizeSubscriptionVisibleGroups(req.Plan.VisibleGroups)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	req.Plan.VisibleGroups = visibleGroups
 	if req.Plan.Currency == "" {
 		req.Plan.Currency = "USD"
 	}
@@ -278,7 +347,7 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 
-	err := model.DB.Transaction(func(tx *gorm.DB) error {
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
 		// update plan (allow zero values updates with map)
 		updateMap := map[string]any{
 			"title":                      req.Plan.Title,
@@ -294,6 +363,7 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 			"creem_product_id":           req.Plan.CreemProductId,
 			"waffo_pancake_product_id":   req.Plan.WaffoPancakeProductId,
 			"max_purchase_per_user":      req.Plan.MaxPurchasePerUser,
+			"visible_groups":             req.Plan.VisibleGroups,
 			"total_amount":               req.Plan.TotalAmount,
 			"upgrade_group":              req.Plan.UpgradeGroup,
 			"downgrade_group":            req.Plan.DowngradeGroup,

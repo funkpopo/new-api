@@ -175,6 +175,30 @@ export function useSubscriptionsColumns(): ColumnDef<PlanRecord>[] {
         size: 150,
       },
       {
+        id: 'visible_groups',
+        header: t('Visible Groups'),
+        meta: { mobileHidden: true },
+        cell: ({ row }) => {
+          const groups = (row.original.plan.visible_groups || '')
+            .split(',')
+            .map((group) => group.trim())
+            .filter(Boolean)
+          if (groups.length === 0) {
+            return (
+              <span className='text-muted-foreground'>{t('All Groups')}</span>
+            )
+          }
+          return (
+            <BadgeCell>
+              {groups.map((group) => (
+                <GroupBadge key={group} group={group} />
+              ))}
+            </BadgeCell>
+          )
+        },
+        size: 160,
+      },
+      {
         id: 'upgrade_group',
         header: t('Upgrade Group'),
         meta: { mobileHidden: true },

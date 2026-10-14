@@ -4933,6 +4933,7 @@
     "Quota after adjustment": "Квота после изменения",
     "Quota before adjustment": "Квота до изменения",
     "Quota change amount cannot be zero": "Изменение квоты не может быть равно нулю",
+    "Quota changes apply immediately to unexpired subscriptions, including cancelled ones. Used quota and expiration dates are preserved.": "Изменения квоты сразу применяются ко всем подпискам с неистёкшим сроком, включая отменённые. Использованная квота и даты окончания сохраняются.",
     "Quota clamped": "Квота ограничена",
     "Quota consumed before charging users": "Квота, потребляемая до взимания платы с пользователей",
     "Quota Distribution": "Распределение квоты",

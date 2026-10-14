@@ -10,7 +10,6 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 )
 
 // ---- Shared types ----
@@ -66,13 +65,17 @@ func GetSubscriptionSelf(c *gin.Context) {
 	// Get all subscriptions (including expired)
 	allSubscriptions, err := model.GetAllUserSubscriptions(userId)
 	if err != nil {
-		allSubscriptions = []model.SubscriptionSummary{}
+		common.ApiError(c, err)
+		return
 	}
 
-	// Get active subscriptions for backward compatibility
-	activeSubscriptions, err := model.GetAllActiveUserSubscriptions(userId)
-	if err != nil {
-		activeSubscriptions = []model.SubscriptionSummary{}
+	// Both lists describe the same snapshot during concurrent lifecycle changes.
+	activeSubscriptions := make([]model.SubscriptionSummary, 0, len(allSubscriptions))
+	now := common.GetTimestamp()
+	for _, summary := range allSubscriptions {
+		if summary.Subscription.Status == "active" && summary.Subscription.EndTime > now {
+			activeSubscriptions = append(activeSubscriptions, summary)
+		}
 	}
 
 	common.ApiSuccess(c, gin.H{
@@ -347,46 +350,11 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 
-	err = model.DB.Transaction(func(tx *gorm.DB) error {
-		// update plan (allow zero values updates with map)
-		updateMap := map[string]any{
-			"title":                      req.Plan.Title,
-			"subtitle":                   req.Plan.Subtitle,
-			"price_amount":               req.Plan.PriceAmount,
-			"currency":                   req.Plan.Currency,
-			"duration_unit":              req.Plan.DurationUnit,
-			"duration_value":             req.Plan.DurationValue,
-			"custom_seconds":             req.Plan.CustomSeconds,
-			"enabled":                    req.Plan.Enabled,
-			"sort_order":                 req.Plan.SortOrder,
-			"stripe_price_id":            req.Plan.StripePriceId,
-			"creem_product_id":           req.Plan.CreemProductId,
-			"waffo_pancake_product_id":   req.Plan.WaffoPancakeProductId,
-			"max_purchase_per_user":      req.Plan.MaxPurchasePerUser,
-			"visible_groups":             req.Plan.VisibleGroups,
-			"total_amount":               req.Plan.TotalAmount,
-			"upgrade_group":              req.Plan.UpgradeGroup,
-			"downgrade_group":            req.Plan.DowngradeGroup,
-			"quota_reset_period":         req.Plan.QuotaResetPeriod,
-			"quota_reset_custom_seconds": req.Plan.QuotaResetCustomSeconds,
-			"updated_at":                 common.GetTimestamp(),
-		}
-		if req.Plan.AllowBalancePay != nil {
-			updateMap["allow_balance_pay"] = *req.Plan.AllowBalancePay
-		}
-		if req.Plan.AllowWalletOverflow != nil {
-			updateMap["allow_wallet_overflow"] = *req.Plan.AllowWalletOverflow
-		}
-		if err := tx.Model(&model.SubscriptionPlan{}).Where("id = ?", id).Updates(updateMap).Error; err != nil {
-			return err
-		}
-		return nil
-	})
+	err = model.UpdateSubscriptionPlan(&req.Plan)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	model.InvalidateSubscriptionPlanCache(id)
 	common.ApiSuccess(c, nil)
 }
 

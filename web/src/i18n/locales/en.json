@@ -4933,6 +4933,7 @@
     "Quota after adjustment": "Quota after adjustment",
     "Quota before adjustment": "Quota before adjustment",
     "Quota change amount cannot be zero": "Quota change amount cannot be zero",
+    "Quota changes apply immediately to unexpired subscriptions, including cancelled ones. Used quota and expiration dates are preserved.": "Quota changes apply immediately to unexpired subscriptions, including cancelled ones. Used quota and expiration dates are preserved.",
     "Quota clamped": "Quota clamped",
     "Quota consumed before charging users": "Quota consumed before charging users",
     "Quota Distribution": "Quota Distribution",

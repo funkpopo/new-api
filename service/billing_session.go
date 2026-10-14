@@ -277,7 +277,7 @@ func (s *BillingSession) reserveFunding(delta int, requireAvailableQuota bool) e
 		funding.consumed += delta
 		return nil
 	case *SubscriptionFunding:
-		if err := model.PostConsumeUserSubscriptionDelta(funding.subscriptionId, int64(delta)); err != nil {
+		if err := model.ReserveUserSubscriptionQuota(funding.subscriptionId, int64(delta)); err != nil {
 			return types.NewErrorWithStatusCode(
 				errors.New(i18n.Translate(s.lang, i18n.MsgQuotaSubscriptionInsufficient, map[string]any{"Error": err.Error()})),
 				types.ErrorCodeInsufficientUserQuota,

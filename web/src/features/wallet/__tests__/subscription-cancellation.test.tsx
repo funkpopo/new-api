@@ -16,11 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import {
+  focusManager,
+  QueryClient,
+  QueryClientProvider,
+} from '@tanstack/react-query'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { toast } from 'sonner'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { UserSubscriptionRecord } from '@/features/subscriptions/types'
 import { api } from '@/lib/api'
@@ -102,7 +106,110 @@ beforeEach(() => {
   }))
 })
 
+afterEach(() => {
+  focusManager.setFocused(undefined)
+  vi.useRealTimers()
+})
+
 describe('wallet subscription cancellation', () => {
+  it('refreshes subscription changes periodically while the wallet stays visible', async () => {
+    renderSubscriptions()
+    await screen.findByRole('button', { name: 'Cancel subscription' })
+    vi.useFakeTimers()
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+      await vi.advanceTimersByTimeAsync(1)
+    })
+    expect(
+      screen.getByRole('button', { name: 'Cancel subscription' })
+    ).toBeEnabled()
+    subscriptions = subscriptions.map((item) => ({
+      subscription: { ...item.subscription, status: 'cancelled' },
+    }))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_001)
+    })
+    expect(screen.getByRole('button', { name: 'Resubscribe' })).toBeEnabled()
+    expect(
+      screen.queryByRole('button', { name: 'Cancel subscription' })
+    ).not.toBeInTheDocument()
+  })
+
+  it('keeps a cancellation visible when an older refresh returns late', async () => {
+    const user = userEvent.setup()
+    renderSubscriptions()
+    await screen.findByRole('button', { name: 'Cancel subscription' })
+    const oldSubscriptions = structuredClone(subscriptions)
+    let completeRefresh!: (response: unknown) => void
+    const get = vi.mocked(api.get)
+    const originalGet = get.getMockImplementation()
+    if (!originalGet) throw new Error('Subscription API fixture is missing')
+    let refreshPending = false
+    get.mockImplementation((url, config) => {
+      if (url === '/api/subscription/self' && !refreshPending) {
+        refreshPending = true
+        return new Promise((resolve) => {
+          completeRefresh = resolve
+        })
+      }
+      return originalGet(url, config)
+    })
+    act(() => focusManager.setFocused(false))
+    act(() => focusManager.setFocused(true))
+    await waitFor(() => expect(completeRefresh).toBeDefined())
+    vi.spyOn(api, 'post').mockImplementation(async () => {
+      subscriptions = subscriptions.map((item) => ({
+        subscription: { ...item.subscription, status: 'cancelled' },
+      }))
+      return { data: { success: true } }
+    })
+    await user.click(
+      screen.getByRole('button', { name: 'Cancel subscription' })
+    )
+    const dialog = await screen.findByRole('alertdialog')
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Cancel subscription' })
+    )
+    expect(
+      await screen.findByRole('button', { name: 'Resubscribe' })
+    ).toBeEnabled()
+    await act(async () =>
+      completeRefresh({
+        data: {
+          success: true,
+          data: {
+            billing_preference: 'subscription_only',
+            subscriptions: [oldSubscriptions[0]],
+            all_subscriptions: oldSubscriptions,
+          },
+        },
+      })
+    )
+    expect(screen.getByRole('button', { name: 'Resubscribe' })).toBeEnabled()
+    expect(
+      screen.queryByRole('button', { name: 'Cancel subscription' })
+    ).not.toBeInTheDocument()
+  })
+
+  it('refreshes an external cancellation when the wallet regains focus', async () => {
+    renderSubscriptions()
+    expect(
+      await screen.findByRole('button', { name: 'Cancel subscription' })
+    ).toBeEnabled()
+    act(() => focusManager.setFocused(false))
+    subscriptions = subscriptions.map((item) => ({
+      subscription: { ...item.subscription, status: 'cancelled' },
+    }))
+    act(() => focusManager.setFocused(true))
+    expect(
+      await screen.findByRole('button', { name: 'Resubscribe' })
+    ).toBeEnabled()
+    expect(
+      screen.queryByRole('button', { name: 'Cancel subscription' })
+    ).not.toBeInTheDocument()
+  })
+
   it('offers resubscription only for cancelled subscriptions that have not expired', async () => {
     subscriptions[1].subscription.end_time =
       subscriptions[0].subscription.end_time

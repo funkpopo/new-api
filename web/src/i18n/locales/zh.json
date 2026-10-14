@@ -4933,6 +4933,7 @@
     "Quota after adjustment": "调整后额度",
     "Quota before adjustment": "调整前额度",
     "Quota change amount cannot be zero": "额度变更量不能为 0",
+    "Quota changes apply immediately to unexpired subscriptions, including cancelled ones. Used quota and expiration dates are preserved.": "额度变更立即应用于尚未到期的订阅，包括已退订的订阅。已用额度和到期时间保持不变。",
     "Quota clamped": "额度已钳制",
     "Quota consumed before charging users": "向用户收费前消耗的配额",
     "Quota Distribution": "消耗分布",

@@ -16,9 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Crown, RefreshCw, Sparkles, Check, CircleX } from 'lucide-react'
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -58,12 +58,14 @@ import { SubscriptionPurchaseDialog } from '@/features/subscriptions/components/
 import { formatDuration, formatResetPeriod } from '@/features/subscriptions/lib'
 import type {
   PlanRecord,
+  SelfSubscriptionData,
   UserSubscriptionRecord,
 } from '@/features/subscriptions/types'
 import { formatQuota } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import type { PaymentMethod, TopupInfo } from '../types'
 
@@ -106,17 +108,43 @@ export function SubscriptionPlansCard({
 }: SubscriptionPlansCardProps) {
   const { t } = useTranslation()
 
-  const [plans, setPlans] = useState<PlanRecord[]>([])
-  const [activeSubscriptions, setActiveSubscriptions] = useState<
-    UserSubscriptionRecord[]
-  >([])
-  const [allSubscriptions, setAllSubscriptions] = useState<
-    UserSubscriptionRecord[]
-  >([])
-  const [billingPreference, setBillingPreference] =
-    useState('subscription_first')
-  const [loading, setLoading] = useState(true)
-  const [refreshing, setRefreshing] = useState(false)
+  const queryClient = useQueryClient()
+  const userId = useAuthStore((state) => state.auth.user?.id)
+  const plansKey = ['wallet', userId, 'subscription-plans'] as const
+  const subscriptionsKey = ['wallet', userId, 'subscriptions'] as const
+  const plansQuery = useQuery({
+    queryKey: plansKey,
+    queryFn: async ({ signal }) =>
+      requireServerSuccess(await getPublicPlans(signal)).data || [],
+    refetchOnWindowFocus: 'always',
+    refetchInterval: 30_000,
+  })
+  const subscriptionsQuery = useQuery({
+    queryKey: subscriptionsKey,
+    queryFn: async ({ signal }) =>
+      requireServerSuccess(await getSelfSubscriptionFull(signal)).data || {
+        billing_preference: 'subscription_first',
+        subscriptions: [],
+        all_subscriptions: [],
+      },
+    refetchOnWindowFocus: 'always',
+    refetchInterval: 30_000,
+  })
+  const plans = useMemo(() => plansQuery.data || [], [plansQuery.data])
+  const activeSubscriptions = subscriptionsQuery.data?.subscriptions || []
+  const allSubscriptions = useMemo(
+    () => subscriptionsQuery.data?.all_subscriptions || [],
+    [subscriptionsQuery.data]
+  )
+  const [pendingPreference, setPendingPreference] = useState<string | null>(
+    null
+  )
+  const billingPreference =
+    pendingPreference ??
+    subscriptionsQuery.data?.billing_preference ??
+    'subscription_first'
+  const loading = plansQuery.isPending || subscriptionsQuery.isPending
+  const refreshing = plansQuery.isFetching || subscriptionsQuery.isFetching
 
   const [purchaseOpen, setPurchaseOpen] = useState(false)
   const [selectedPlan, setSelectedPlan] = useState<PlanRecord | null>(null)
@@ -134,60 +162,41 @@ export function SubscriptionPlansCard({
     [topupInfo?.pay_methods]
   )
 
-  const fetchPlans = useCallback(async () => {
-    try {
-      const res = requireServerSuccess(await getPublicPlans())
-      if (res.success) {
-        setPlans(res.data || [])
-      }
-    } catch (error) {
-      handleServerError(error)
-      setPlans([])
-    }
-  }, [])
-
-  const fetchSelfSubscription = useCallback(async () => {
-    try {
-      const res = requireServerSuccess(await getSelfSubscriptionFull())
-      if (res.success && res.data) {
-        setBillingPreference(
-          res.data.billing_preference || 'subscription_first'
-        )
-        setActiveSubscriptions(res.data.subscriptions || [])
-        setAllSubscriptions(res.data.all_subscriptions || [])
-      }
-    } catch (error) {
-      handleServerError(error)
-    }
-  }, [])
+  const refreshSubscriptions = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: subscriptionsKey }),
+      queryClient.invalidateQueries({ queryKey: plansKey }),
+    ])
+  }
 
   const cancelMutation = useMutation({
     mutationFn: async (subId: number) =>
       requireServerSuccess(await cancelSelfSubscription(subId)),
     onSuccess: async (_, subId) => {
       setCancelSubscriptionId(null)
-      setActiveSubscriptions((subscriptions) =>
-        subscriptions.filter((sub) => sub.subscription.id !== subId)
-      )
-      setAllSubscriptions((subscriptions) =>
-        subscriptions.map((sub) =>
-          sub.subscription.id === subId
-            ? {
-                ...sub,
-                subscription: {
-                  ...sub.subscription,
-                  status: 'cancelled',
-                },
-              }
-            : sub
-        )
+      await queryClient.cancelQueries({ queryKey: subscriptionsKey })
+      queryClient.setQueryData<SelfSubscriptionData>(
+        subscriptionsKey,
+        (current) => {
+          if (!current) return current
+          return {
+            ...current,
+            subscriptions: current.subscriptions.filter(
+              (sub) => sub.subscription.id !== subId
+            ),
+            all_subscriptions: current.all_subscriptions.map((sub) =>
+              sub.subscription.id === subId
+                ? {
+                    ...sub,
+                    subscription: { ...sub.subscription, status: 'cancelled' },
+                  }
+                : sub
+            ),
+          }
+        }
       )
       toast.success(t('Subscription cancelled'))
-      await Promise.all([
-        fetchSelfSubscription(),
-        fetchPlans(),
-        onSubscriptionChange?.(),
-      ])
+      await Promise.all([refreshSubscriptions(), onSubscriptionChange?.()])
     },
     onError: (error) => handleServerError(error),
   })
@@ -198,51 +207,33 @@ export function SubscriptionPlansCard({
     onSuccess: async () => {
       setResubscribeId(null)
       toast.success(t('Subscription restored'))
-      await Promise.all([
-        fetchSelfSubscription(),
-        fetchPlans(),
-        onSubscriptionChange?.(),
-      ])
+      await Promise.all([refreshSubscriptions(), onSubscriptionChange?.()])
     },
     onError: (error) => handleServerError(error),
   })
   const changingSubscription =
     cancelMutation.isPending || resubscribeMutation.isPending
 
-  useEffect(() => {
-    const init = async () => {
-      setLoading(true)
-      await Promise.all([fetchPlans(), fetchSelfSubscription()])
-      setLoading(false)
-    }
-    init()
-  }, [fetchPlans, fetchSelfSubscription])
-
-  const handleRefresh = async () => {
-    setRefreshing(true)
-    try {
-      await fetchSelfSubscription()
-    } finally {
-      setRefreshing(false)
-    }
-  }
-
   const handlePreferenceChange = async (pref: string) => {
-    const previous = billingPreference
-    setBillingPreference(pref)
+    setPendingPreference(pref)
     try {
-      const res = await updateBillingPreference(pref)
-      if (res.success) {
-        toast.success(t('Updated successfully'))
-        const normalized = res.data?.billing_preference || pref
-        setBillingPreference(normalized)
-      } else {
-        handleServerError(res, t('Update failed'))
-        setBillingPreference(previous)
-      }
+      const res = requireServerSuccess(await updateBillingPreference(pref))
+      await queryClient.cancelQueries({ queryKey: subscriptionsKey })
+      queryClient.setQueryData<SelfSubscriptionData>(
+        subscriptionsKey,
+        (current) =>
+          current
+            ? {
+                ...current,
+                billing_preference: res.data?.billing_preference || pref,
+              }
+            : current
+      )
+      toast.success(t('Updated successfully'))
     } catch (error) {
-      handleServerError(error, t('Request failed'))
-      setBillingPreference(previous)
+      handleServerError(error, t('Update failed'))
+    } finally {
+      setPendingPreference(null)
     }
   }
 
@@ -426,7 +417,8 @@ export function SubscriptionPlansCard({
                 variant='ghost'
                 size='icon'
                 className='h-8 w-8'
-                onClick={handleRefresh}
+                aria-label={t('Refresh')}
+                onClick={refreshSubscriptions}
                 disabled={refreshing}
               >
                 <RefreshCw
@@ -772,7 +764,7 @@ export function SubscriptionPlansCard({
         onOpenChange={(open) => {
           setPurchaseOpen(open)
           if (!open) {
-            fetchSelfSubscription()
+            void refreshSubscriptions()
           }
         }}
         plan={selectedPlan}

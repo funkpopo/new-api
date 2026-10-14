@@ -4933,6 +4933,7 @@
     "Quota after adjustment": "Quota après modification",
     "Quota before adjustment": "Quota avant modification",
     "Quota change amount cannot be zero": "Le montant de la modification de quota ne peut pas être nul",
+    "Quota changes apply immediately to unexpired subscriptions, including cancelled ones. Used quota and expiration dates are preserved.": "Les changements de quota s’appliquent immédiatement aux abonnements non expirés, y compris ceux annulés. Le quota utilisé et les dates d’expiration sont conservés.",
     "Quota clamped": "Quota plafonné",
     "Quota consumed before charging users": "Quota consommé avant de facturer les utilisateurs",
     "Quota Distribution": "Distribution des quotas",

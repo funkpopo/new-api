@@ -1,6 +1,9 @@
 package controller
 
 import (
+	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,12 +12,16 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestSelfSubscriptionLifecycleDatabaseMatrix(t *testing.T) {
+	confirmPaymentComplianceForTest(t)
 	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
 		t.Run(dialect.kind, func(t *testing.T) {
 			if dialect.env != "" && os.Getenv(dialect.env) == "" {
@@ -43,7 +50,7 @@ func TestSelfSubscriptionLifecycleDatabaseMatrix(t *testing.T) {
 			connection, err = db.DB()
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, connection.Close()) })
-			require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSubscription{}))
+			require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionOrder{}, &model.SubscriptionPreConsumeRecord{}, &model.TopUp{}))
 			model.LOG_DB, _ = newAuditTestDatabase(t, dialect.kind, os.Getenv(dialect.env))
 			require.NoError(t, model.LOG_DB.AutoMigrate(&model.Log{}))
 			versionQuery := "SELECT version()"
@@ -53,6 +60,15 @@ func TestSelfSubscriptionLifecycleDatabaseMatrix(t *testing.T) {
 			var version string
 			require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
 			t.Logf("database version: %s (separate log database)", version)
+
+			plan := model.SubscriptionPlan{Title: "Lifecycle", DurationUnit: model.SubscriptionDurationMonth, DurationValue: 1, TotalAmount: 1000}
+			require.NoError(t, db.Create(&plan).Error)
+			model.InvalidateSubscriptionPlanCache(plan.Id)
+			t.Run("live quota and in-flight billing", testSubscriptionLiveQuota)
+			t.Run("overlapping group entitlements", testSubscriptionOverlappingGroups)
+			t.Run("restore across reset boundary", testSubscriptionRestoreReset)
+			t.Run("issuance ignores stale plan cache", testSubscriptionFreshIssuance)
+			t.Run("concurrent cancellation", testSubscriptionConcurrentCancellation)
 
 			for index, tc := range []struct {
 				name             string
@@ -195,4 +211,332 @@ func TestSelfSubscriptionLifecycleDatabaseMatrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testSubscriptionLiveQuota(t *testing.T) {
+	db := model.DB
+	connection, err := db.DB()
+	require.NoError(t, err)
+	previousLimit := connection.Stats().MaxOpenConnections
+	connection.SetMaxOpenConns(1)
+	t.Cleanup(func() { connection.SetMaxOpenConns(previousLimit) })
+	now := common.GetTimestamp()
+	user := model.User{Username: "live-quota", AffCode: "live-quota", Group: "default", Quota: 500}
+	require.NoError(t, db.Create(&user).Error)
+	plan := model.SubscriptionPlan{Title: "Live quota", DurationUnit: model.SubscriptionDurationMonth, DurationValue: 1, TotalAmount: 1000, AllowWalletOverflow: common.GetPointer(true)}
+	require.NoError(t, db.Create(&plan).Error)
+	active := model.UserSubscription{UserId: user.Id, PlanId: plan.Id, Status: "active", AmountTotal: 1000, AmountUsed: 500, StartTime: now - 60, EndTime: now + 7200, LastResetTime: now - 60, NextResetTime: now + 3600, AllowWalletOverflow: true}
+	cancelled, expired := active, active
+	cancelled.Status, expired.EndTime = "cancelled", now-1
+	for _, sub := range []*model.UserSubscription{&active, &cancelled, &expired} {
+		require.NoError(t, db.Create(sub).Error)
+	}
+	_, err = model.PreConsumeUserSubscription("live-refund", user.Id, "test", 0, 100)
+	require.NoError(t, err)
+	_, err = model.GetSubscriptionPlanById(plan.Id) // Prime the old plan cache.
+	require.NoError(t, err)
+	plan.TotalAmount, plan.AllowWalletOverflow = 200, common.GetPointer(false)
+	var response struct{ Success bool }
+	subscriptionVisibilityRequest(t, AdminUpdateSubscriptionPlan, user.Id, plan.Id, AdminUpsertSubscriptionPlanRequest{Plan: plan}, &response)
+	require.True(t, response.Success)
+	for _, original := range []model.UserSubscription{active, cancelled, expired} {
+		var saved model.UserSubscription
+		require.NoError(t, db.First(&saved, original.Id).Error)
+		if original.Id == expired.Id {
+			assert.EqualValues(t, 1000, saved.AmountTotal)
+			assert.True(t, saved.AllowWalletOverflow)
+		} else {
+			assert.EqualValues(t, 200, saved.AmountTotal)
+			assert.False(t, saved.AllowWalletOverflow)
+		}
+		assert.Equal(t, original.Status, saved.Status)
+		assert.Equal(t, original.EndTime, saved.EndTime)
+		assert.Equal(t, original.LastResetTime, saved.LastResetTime)
+		assert.Equal(t, original.NextResetTime, saved.NextResetTime)
+	}
+	allow, err := model.UserActiveSubscriptionsAllowWalletOverflow(user.Id)
+	require.NoError(t, err)
+	assert.False(t, allow)
+	_, err = model.PreConsumeUserSubscription("lowered-limit", user.Id, "test", 0, 1)
+	require.Error(t, err)
+	require.Error(t, model.ReserveUserSubscriptionQuota(active.Id, 1))
+	require.NoError(t, model.PostConsumeUserSubscriptionDelta(active.Id, 25), "already performed work remains chargeable")
+
+	// A failed refund-record write must roll back the quota change too.
+	const callback = "test:subscription_refund_failure"
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "subscription_pre_consume_records" {
+			tx.AddError(errors.New("forced refund record failure"))
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove(callback) })
+	require.Error(t, model.RefundSubscriptionPreConsume("live-refund"))
+	var saved model.UserSubscription
+	require.NoError(t, db.First(&saved, active.Id).Error)
+	assert.EqualValues(t, 625, saved.AmountUsed)
+	require.NoError(t, db.Callback().Update().Remove(callback))
+	require.NoError(t, model.RefundSubscriptionPreConsume("live-refund"))
+	require.NoError(t, model.RefundSubscriptionPreConsume("live-refund"))
+	require.NoError(t, db.First(&saved, active.Id).Error)
+	assert.EqualValues(t, 525, saved.AmountUsed, "refund works above the limit and is idempotent")
+
+	_, err = model.CancelUserSubscription(user.Id, active.Id)
+	require.NoError(t, err)
+	require.Error(t, model.ReserveUserSubscriptionQuota(active.Id, 1))
+	require.NoError(t, model.PostConsumeUserSubscriptionDelta(active.Id, -25))
+	require.NoError(t, model.ResubscribeUserSubscription(user.Id, active.Id))
+	require.NoError(t, db.First(&saved, active.Id).Error)
+	assert.EqualValues(t, 500, saved.AmountUsed)
+	assert.EqualValues(t, 200, saved.AmountTotal)
+	assert.Equal(t, active.EndTime, saved.EndTime)
+
+	plan.TotalAmount, plan.AllowWalletOverflow = 800, common.GetPointer(true)
+	require.NoError(t, model.UpdateSubscriptionPlan(&plan))
+	reservation, err := model.PreConsumeUserSubscription("raised-limit", user.Id, "test", 0, 300)
+	require.NoError(t, err)
+	assert.EqualValues(t, 800, reservation.AmountTotal)
+	assert.EqualValues(t, 800, reservation.AmountUsedAfter)
+	plan.TotalAmount = 0
+	require.NoError(t, model.UpdateSubscriptionPlan(&plan))
+	require.NoError(t, model.ReserveUserSubscriptionQuota(active.Id, 100))
+	allow, err = model.UserActiveSubscriptionsAllowWalletOverflow(user.Id)
+	require.NoError(t, err)
+	assert.True(t, allow)
+	assert.Error(t, model.PostConsumeUserSubscriptionDelta(active.Id, math.MaxInt64))
+	_, err = model.PreConsumeUserSubscription("overflow", user.Id, "test", 0, math.MaxInt64)
+	require.Error(t, err)
+	require.NoError(t, db.First(&saved, active.Id).Error)
+	assert.EqualValues(t, 900, saved.AmountUsed)
+	require.NoError(t, db.First(&user, user.Id).Error)
+	assert.Equal(t, 500, user.Quota)
+	missing := plan
+	missing.Id = math.MaxInt32
+	require.ErrorIs(t, model.UpdateSubscriptionPlan(&missing), gorm.ErrRecordNotFound)
+
+	const planFailure = "test:subscription_plan_sync_failure"
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register(planFailure, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "user_subscriptions" {
+			tx.AddError(errors.New("forced subscription sync failure"))
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove(planFailure) })
+	plan.TotalAmount = 1500
+	require.Error(t, model.UpdateSubscriptionPlan(&plan))
+	var storedPlan model.SubscriptionPlan
+	require.NoError(t, db.First(&storedPlan, plan.Id).Error)
+	assert.Zero(t, storedPlan.TotalAmount, "plan and subscription limits roll back together")
+	require.NoError(t, db.First(&saved, active.Id).Error)
+	assert.Zero(t, saved.AmountTotal)
+	require.NoError(t, db.Callback().Update().Remove(planFailure))
+	plan.QuotaResetPeriod, plan.QuotaResetCustomSeconds = model.SubscriptionResetCustom, 3600
+	require.NoError(t, model.UpdateSubscriptionPlan(&plan))
+	require.NoError(t, db.First(&saved, active.Id).Error)
+	assert.EqualValues(t, 900, saved.AmountUsed, "changing reset schedule does not grant free quota")
+	assert.InDelta(t, common.GetTimestamp()+3600, saved.NextResetTime, 2)
+	assert.Equal(t, active.EndTime, saved.EndTime)
+	var paused model.UserSubscription
+	require.NoError(t, db.First(&paused, cancelled.Id).Error)
+	assert.Equal(t, saved.NextResetTime, paused.NextResetTime)
+	assert.EqualValues(t, 500, paused.AmountUsed)
+	plan.QuotaResetPeriod = model.SubscriptionResetNever
+	require.NoError(t, model.UpdateSubscriptionPlan(&plan))
+	require.NoError(t, db.First(&saved, active.Id).Error)
+	assert.Zero(t, saved.NextResetTime)
+	assert.EqualValues(t, 900, saved.AmountUsed)
+}
+
+func testSubscriptionOverlappingGroups(t *testing.T) {
+	server := miniredis.RunT(t)
+	previousRedis, previousClient := common.RedisEnabled, common.RDB
+	common.RedisEnabled, common.RDB = true, redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() {
+		_ = common.RDB.Close()
+		common.RedisEnabled, common.RDB = previousRedis, previousClient
+	})
+	for index, tc := range []struct {
+		name, secondGroup, action string
+		olderFirst                bool
+	}{
+		{"same group older first", "vip", "cancel", true},
+		{"same group newer first", "vip", "cancel", false},
+		{"different groups older first", "pro", "cancel", true},
+		{"legacy predecessor chain", "pro", "cancel", true},
+		{"different groups newer first", "pro", "cancel", false},
+		{"administrator deletion", "pro", "delete", false},
+		{"expiry with another plan", "pro", "expire", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			user := model.User{Username: fmt.Sprintf("stack-%d", index), AffCode: fmt.Sprintf("stack-%d", index), Group: "default", AuthVersion: 7}
+			require.NoError(t, model.DB.Create(&user).Error)
+			_, err := model.GetUserCache(user.Id)
+			require.NoError(t, err)
+			var subs []model.UserSubscription
+			for _, group := range []string{"vip", tc.secondGroup} {
+				plan := model.SubscriptionPlan{Title: "Stack " + group, UpgradeGroup: group, DurationUnit: model.SubscriptionDurationMonth, DurationValue: 1, TotalAmount: 1000}
+				require.NoError(t, model.DB.Create(&plan).Error)
+				_, err := model.AdminBindSubscription(user.Id, plan.Id, "")
+				require.NoError(t, err)
+			}
+			require.NoError(t, model.DB.Where("user_id = ?", user.Id).Order("id asc").Find(&subs).Error)
+			require.Len(t, subs, 2)
+			assert.Equal(t, "default", subs[0].PrevUserGroup)
+			assert.Equal(t, "default", subs[1].PrevUserGroup)
+			if tc.name == "legacy predecessor chain" {
+				require.NoError(t, model.DB.Model(&subs[1]).Update("prev_user_group", "vip").Error)
+			}
+			first, remaining := subs[1], subs[0]
+			if tc.olderFirst {
+				first, remaining = subs[0], subs[1]
+			}
+			switch tc.action {
+			case "delete":
+				_, err := model.AdminDeleteUserSubscription(first.Id)
+				require.NoError(t, err)
+			case "expire":
+				require.NoError(t, model.DB.Model(&first).Update("end_time", common.GetTimestamp()-1).Error)
+				_, err := model.ExpireDueSubscriptions(100)
+				require.NoError(t, err)
+			default:
+				_, err := model.CancelUserSubscription(user.Id, first.Id)
+				require.NoError(t, err)
+			}
+			require.NoError(t, model.DB.First(&user, user.Id).Error)
+			assert.Equal(t, remaining.UpgradeGroup, user.Group)
+			cached, err := model.GetUserCache(user.Id)
+			require.NoError(t, err)
+			assert.Equal(t, remaining.UpgradeGroup, cached.Group)
+			_, err = model.CancelUserSubscription(user.Id, remaining.Id)
+			require.NoError(t, err)
+			require.NoError(t, model.DB.First(&user, user.Id).Error)
+			assert.Equal(t, "default", user.Group)
+			cached, err = model.GetUserCache(user.Id)
+			require.NoError(t, err)
+			assert.Equal(t, "default", cached.Group)
+			require.NoError(t, model.ResubscribeUserSubscription(user.Id, remaining.Id))
+			require.NoError(t, model.DB.First(&user, user.Id).Error)
+			assert.Equal(t, remaining.UpgradeGroup, user.Group)
+			cached, err = model.GetUserCache(user.Id)
+			require.NoError(t, err)
+			assert.Equal(t, remaining.UpgradeGroup, cached.Group)
+			_, err = model.CancelUserSubscription(user.Id, remaining.Id)
+			require.NoError(t, err)
+			require.NoError(t, model.DB.First(&user, user.Id).Error)
+			assert.Equal(t, "default", user.Group)
+			assert.EqualValues(t, 7, user.AuthVersion)
+		})
+	}
+
+	t.Run("removing a cancelled subscription preserves a manual group change", func(t *testing.T) {
+		user := model.User{Username: "cancelled-admin", AffCode: "cancelled-admin", Group: "vip"}
+		require.NoError(t, model.DB.Create(&user).Error)
+		sub := model.UserSubscription{UserId: user.Id, PlanId: 1, Status: "cancelled", UpgradeGroup: "vip", PrevUserGroup: "default", EndTime: common.GetTimestamp() + 3600}
+		require.NoError(t, model.DB.Create(&sub).Error)
+		_, err := model.AdminInvalidateUserSubscription(sub.Id)
+		require.NoError(t, err)
+		require.NoError(t, model.DB.First(&user, user.Id).Error)
+		assert.Equal(t, "vip", user.Group)
+		_, err = model.AdminDeleteUserSubscription(sub.Id)
+		require.NoError(t, err)
+		require.NoError(t, model.DB.First(&user, user.Id).Error)
+		assert.Equal(t, "vip", user.Group)
+	})
+}
+
+func testSubscriptionRestoreReset(t *testing.T) {
+	user := model.User{Username: "restore-reset", AffCode: "restore-reset", Group: "default"}
+	require.NoError(t, model.DB.Create(&user).Error)
+	plan := model.SubscriptionPlan{Title: "Hourly", TotalAmount: 1000, QuotaResetPeriod: model.SubscriptionResetCustom, QuotaResetCustomSeconds: 3600}
+	require.NoError(t, model.DB.Create(&plan).Error)
+	now := common.GetTimestamp()
+	sub := model.UserSubscription{UserId: user.Id, PlanId: plan.Id, Status: "cancelled", AmountTotal: 1000, AmountUsed: 600, StartTime: now - 7200, EndTime: now + 7200, LastResetTime: now - 7200, NextResetTime: now - 3600}
+	require.NoError(t, model.DB.Create(&sub).Error)
+	require.NoError(t, model.ResubscribeUserSubscription(user.Id, sub.Id))
+	var saved model.UserSubscription
+	require.NoError(t, model.DB.First(&saved, sub.Id).Error)
+	assert.Zero(t, saved.AmountUsed)
+	assert.Equal(t, sub.EndTime, saved.EndTime)
+	assert.Greater(t, saved.NextResetTime, common.GetTimestamp())
+	_, err := model.PreConsumeUserSubscription("after-restored-reset", user.Id, "test", 0, 900)
+	require.NoError(t, err)
+	_, err = model.CancelUserSubscription(user.Id, sub.Id)
+	require.NoError(t, err)
+	require.NoError(t, model.ResubscribeUserSubscription(user.Id, sub.Id))
+	require.NoError(t, model.DB.First(&saved, sub.Id).Error)
+	assert.EqualValues(t, 900, saved.AmountUsed, "restoring twice in the same period must not reset quota again")
+}
+
+func testSubscriptionFreshIssuance(t *testing.T) {
+	connection, err := model.DB.DB()
+	require.NoError(t, err)
+	previousLimit := connection.Stats().MaxOpenConnections
+	connection.SetMaxOpenConns(1)
+	t.Cleanup(func() { connection.SetMaxOpenConns(previousLimit) })
+	plan := model.SubscriptionPlan{Title: "Fresh issuance", DurationUnit: model.SubscriptionDurationMonth, DurationValue: 1, TotalAmount: 100}
+	require.NoError(t, model.DB.Create(&plan).Error)
+	model.InvalidateSubscriptionPlanCache(plan.Id)
+	_, err = model.GetSubscriptionPlanById(plan.Id)
+	require.NoError(t, err)
+	// Simulate another process changing the plan while this process retains its cache.
+	require.NoError(t, model.DB.Model(&plan).Update("total_amount", 900).Error)
+	for _, source := range []string{"admin", "balance", "order"} {
+		user := model.User{Username: "fresh-" + source, AffCode: "fresh-" + source, Group: "default"}
+		require.NoError(t, model.DB.Create(&user).Error)
+		switch source {
+		case "admin":
+			_, err = model.AdminBindSubscription(user.Id, plan.Id, "")
+		case "balance":
+			err = model.PurchaseSubscriptionWithBalance(user.Id, plan.Id)
+		case "order":
+			order := model.SubscriptionOrder{UserId: user.Id, PlanId: plan.Id, TradeNo: "fresh-order", Status: common.TopUpStatusPending}
+			require.NoError(t, model.DB.Create(&order).Error)
+			err = model.CompleteSubscriptionOrder(order.TradeNo, "", "", "")
+		}
+		require.NoError(t, err)
+		var sub model.UserSubscription
+		require.NoError(t, model.DB.Where("user_id = ?", user.Id).First(&sub).Error)
+		assert.EqualValues(t, 900, sub.AmountTotal)
+		_, err = model.PreConsumeUserSubscription("fresh-"+source, user.Id, "test", 0, 800)
+		require.NoError(t, err)
+	}
+}
+
+func testSubscriptionConcurrentCancellation(t *testing.T) {
+	connection, err := model.DB.DB()
+	require.NoError(t, err)
+	previousLimit := connection.Stats().MaxOpenConnections
+	connection.SetMaxOpenConns(4)
+	// SQLite serializes writers; use its supported single-connection configuration.
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		connection.SetMaxOpenConns(1)
+	}
+	t.Cleanup(func() { connection.SetMaxOpenConns(previousLimit) })
+	user := model.User{Username: "concurrent-cancel", AffCode: "concurrent-cancel", Group: "default"}
+	require.NoError(t, model.DB.Create(&user).Error)
+	plan := model.SubscriptionPlan{Title: "Concurrent", UpgradeGroup: "vip", DurationUnit: model.SubscriptionDurationMonth, DurationValue: 1}
+	require.NoError(t, model.DB.Create(&plan).Error)
+	for range 2 {
+		_, err := model.AdminBindSubscription(user.Id, plan.Id, "")
+		require.NoError(t, err)
+	}
+	var subs []model.UserSubscription
+	require.NoError(t, model.DB.Where("user_id = ?", user.Id).Find(&subs).Error)
+	require.Len(t, subs, 2)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, sub := range subs {
+		go func() {
+			<-start
+			_, err := model.CancelUserSubscription(user.Id, sub.Id)
+			results <- err
+		}()
+	}
+	close(start)
+	for range 2 {
+		require.NoError(t, <-results)
+	}
+	require.NoError(t, model.DB.First(&user, user.Id).Error)
+	assert.Equal(t, "default", user.Group)
+	hasActive, err := model.HasActiveUserSubscription(user.Id)
+	require.NoError(t, err)
+	assert.False(t, hasActive)
 }

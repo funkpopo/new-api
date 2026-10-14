@@ -4933,6 +4933,7 @@
     "Quota after adjustment": "Hạn mức sau điều chỉnh",
     "Quota before adjustment": "Hạn mức trước điều chỉnh",
     "Quota change amount cannot be zero": "Lượng thay đổi hạn ngạch không được bằng 0",
+    "Quota changes apply immediately to unexpired subscriptions, including cancelled ones. Used quota and expiration dates are preserved.": "Thay đổi hạn mức có hiệu lực ngay với các gói đăng ký chưa hết hạn, kể cả gói đã hủy. Hạn mức đã dùng và ngày hết hạn được giữ nguyên.",
     "Quota clamped": "Hạn ngạch bị giới hạn",
     "Quota consumed before charging users": "Hạn mức tiêu thụ trước khi tính phí người dùng",
     "Quota Distribution": "Phân bổ hạn ngạch",

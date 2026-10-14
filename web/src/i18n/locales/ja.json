@@ -4933,6 +4933,7 @@
     "Quota after adjustment": "調整後のクォータ",
     "Quota before adjustment": "調整前のクォータ",
     "Quota change amount cannot be zero": "クォータの変更量を 0 にすることはできません",
+    "Quota changes apply immediately to unexpired subscriptions, including cancelled ones. Used quota and expiration dates are preserved.": "割り当て量の変更は、解約済みを含む有効期限内のサブスクリプションに即座に適用されます。使用済み割り当て量と有効期限は維持されます。",
     "Quota clamped": "クォータ制限適用",
     "Quota consumed before charging users": "ユーザーに請求する前に消費されるクォータ",
     "Quota Distribution": "クォータの分配",
